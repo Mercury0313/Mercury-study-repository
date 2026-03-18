@@ -1,63 +1,81 @@
+# import numpy as np
+# import mne
+# import os
+# from sklearn.preprocessing import StandardScaler
+# from sklearn.utils import shuffle
+# from sklearn.model_selection import KFold
+# from torch.utils.data import TensorDataset, DataLoader
+# from sklearn.model_selection import train_test_split,StratifiedKFold
+# import torch.optim as optim
+# from sklearn.metrics import accuracy_score, classification_report
+# import torch.nn.init as init
+# import matplotlib.pyplot as plt
+# import pickle
+# from torch import nn
+# import torch.nn.functional as F
+# from torch.utils.data import DataLoader, TensorDataset
+# import torch
+# import torch.nn as nn
+# from torch.utils.data import DataLoader, Subset, TensorDataset
+# from sklearn.model_selection import train_test_split
+# import numpy as np
+# import torch.nn.functional as F
+# from torch.utils.data import DataLoader, TensorDataset
+# import torch
+# import numpy as np
+# import mne
+# import os
+# from sklearn.preprocessing import StandardScaler
+# from sklearn.utils import shuffle
+# from sklearn.model_selection import KFold
+# from torch.utils.data import TensorDataset, DataLoader
+# from sklearn.model_selection import train_test_split,StratifiedKFold
+# import torch.optim as optim
+# from sklearn.metrics import accuracy_score, classification_report
+# import torch.nn.init as init
+# import matplotlib.pyplot as plt
+# import pickle
+# from torch import nn
+# import torch.nn.functional as F
+# from torch.utils.data import DataLoader, TensorDataset
+# import torch
+# import torch.nn as nn
+# from torch.utils.data import Dataset
+# import os
+# import torch
+# from torch import nn
+# import torch
+# import torch.optim as optim
+# import random
+# import os
+# import pickle
+# import os
+# import re
+# import os
+# import re
+# from torch.utils.data import DataLoader
+# from sklearn.metrics import confusion_matrix, roc_auc_score, accuracy_score
+# import torch
+# import torch.nn as nn
+# import torch.nn.functional as F
+
+
 import numpy as np
 import mne
 import os
+import re
 from sklearn.preprocessing import StandardScaler
 from sklearn.utils import shuffle
-from sklearn.model_selection import KFold
-from torch.utils.data import TensorDataset, DataLoader
-from sklearn.model_selection import train_test_split,StratifiedKFold
-import torch.optim as optim
-from sklearn.metrics import accuracy_score, classification_report
-import torch.nn.init as init
-import matplotlib.pyplot as plt
-import pickle
-from torch import nn
-import torch.nn.functional as F
-from torch.utils.data import DataLoader, TensorDataset
+from sklearn.model_selection import KFold, train_test_split, StratifiedKFold
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, roc_auc_score
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, Subset, TensorDataset
-from sklearn.model_selection import train_test_split
-import numpy as np
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, TensorDataset
-import torch
-import numpy as np
-import mne
-import os
-from sklearn.preprocessing import StandardScaler
-from sklearn.utils import shuffle
-from sklearn.model_selection import KFold
-from torch.utils.data import TensorDataset, DataLoader
-from sklearn.model_selection import train_test_split,StratifiedKFold
 import torch.optim as optim
-from sklearn.metrics import accuracy_score, classification_report
-import torch.nn.init as init
+from torch.utils.data import DataLoader, TensorDataset, Dataset, Subset
 import matplotlib.pyplot as plt
 import pickle
-from torch import nn
-import torch.nn.functional as F
-from torch.utils.data import DataLoader, TensorDataset
-import torch
-import torch.nn as nn
-from torch.utils.data import Dataset
-import os
-import torch
-from torch import nn
-import torch
-import torch.optim as optim
 import random
-import os
-import pickle
-import os
-import re
-import os
-import re
-from torch.utils.data import DataLoader
-from sklearn.metrics import confusion_matrix, roc_auc_score, accuracy_score
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
 
 
 class CBAM(nn.Module):
@@ -492,14 +510,16 @@ def main():
     data_dirs = [
     
         
-
-        
        
-         '/root/autodl-tmp/batches5/',
-        '/root/autodl-tmp/batches4/',
-        '/root/autodl-tmp/batches3/',
-        '/root/autodl-tmp/batches2/',
-        '/root/autodl-tmp/batches1/'
+    #    "D:\Graduation_thesis\data\chb-mit-scalp-eeg-database-1.0.0\chb01",
+    #    "D:\Graduation_thesis\data\chb-mit-scalp-eeg-database-1.0.0\chb02",
+        # "D:\Graduation_thesis\data\chb-mit-scalp-eeg-database-1.0.0\chb02"
+       
+        #  '/root/autodl-tmp/batches5/',
+        # '/root/autodl-tmp/batches4/',
+        # '/root/autodl-tmp/batches3/',
+        # '/root/autodl-tmp/batches2/',
+        # '/root/autodl-tmp/batches1/'
        
     ]
 
@@ -521,8 +541,7 @@ def main():
             # 列出目录中的所有文件
             files = os.listdir(data_dir)
             # 按数字对文件进行排序（这里假设文件名包含数字）
-            files = sorted(files, key=lambda x: int(re.search(r'\d+', x).group()))
-
+            #files = sorted(files, key=lambda x: int(re.search(r'\d+', x).group()))           
             # 在开始新的迭代时清空 data_files 和 label_files
             data_files = []
             label_files = []
@@ -767,3 +786,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+#    print("test")
+    
