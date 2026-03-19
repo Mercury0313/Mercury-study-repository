@@ -1176,6 +1176,94 @@ def main():
     print(f"  F1 Score:  {avg_f1:.4f} ± {std_f1:.4f}")
     print(f"  AUC:       {avg_auc:.4f} ± {std_auc:.4f}")
     
+    # 12. 选择最佳模型
+    print("\n" + "="*70)
+    print("选择最佳模型")
+    print("="*70)
+    
+    # 使用F1分数作为主要指标选择最佳模型
+    best_fold_idx = np.argmax([r['f1'] for r in all_fold_results])
+    best_fold = best_fold_idx + 1
+    best_results = all_fold_results[best_fold_idx]
+    
+    print(f"\n最佳模型: 第 {best_fold} 折")
+    print(f"  F1 Score:  {best_results['f1']:.4f}")
+    print(f"  Accuracy:  {best_results['accuracy']:.4f}")
+    print(f"  Precision: {best_results['precision']:.4f}")
+    print(f"  Recall:    {best_results['recall']:.4f}")
+    print(f"  AUC:       {best_results['auc']:.4f}")
+    
+    # # 13. 在chb03上测试最佳模型
+    # print("\n" + "="*70)
+    # print("在chb03上测试最佳模型")
+    # print("="*70)
+    
+    # test_patient_ids = ['chb03']
+    # test_stft_files, test_seizure_times = load_all_patients_data(
+    #     patient_ids=test_patient_ids,
+    #     base_data_dir=base_data_dir
+    # )
+    
+    # if len(test_stft_files) == 0:
+    #     print("\n❌ 错误: 没有找到chb03的STFT文件！")
+    # else:
+    #     # 创建测试数据集
+    #     try:
+    #         test_dataset = MultiFileSTFTWithLabels(
+    #             stft_files=test_stft_files,
+    #             seizure_times=test_seizure_times,
+    #             window_size=30,
+    #             stride=15,
+    #             normalize=True,
+    #             balance_classes=False  # 测试集不需要平衡
+    #         )
+            
+    #         print(f"\nchb03测试集大小: {len(test_dataset)}")
+            
+    #         # 创建测试数据加载器
+    #         test_batch_size = min(16, len(test_dataset))
+    #         test_loader = DataLoader(test_dataset, batch_size=test_batch_size, shuffle=False, num_workers=0)
+            
+    #         # 加载最佳模型
+    #         best_model_path = f'best_dcrnn_model_fold{best_fold}.pth'
+    #         if Path(best_model_path).exists():
+    #             # 重新初始化模型
+    #             best_model = DCRNNForSTFT(
+    #                 input_size=features,
+    #                 hidden_size=128,
+    #                 num_layers=2,
+    #                 num_classes=2,
+    #                 dropout=0.3
+    #             ).to(device)
+                
+    #             best_model.load_state_dict(torch.load(best_model_path))
+    #             print(f"\n✅ 已加载最佳模型: {best_model_path}")
+                
+        #         # 在chb03上测试
+        #         chb03_results = test_model(best_model, test_loader, device)
+                
+        #         # 保存chb03测试结果
+        #         chb03_converted = {
+        #             'test_patient': 'chb03',
+        #             'best_fold': best_fold,
+        #             'accuracy': float(chb03_results['accuracy']),
+        #             'precision': float(chb03_results['precision']),
+        #             'recall': float(chb03_results['recall']),
+        #             'f1': float(chb03_results['f1']),
+        #             'auc': float(chb03_results['auc']),
+        #             'confusion_matrix': chb03_results['confusion_matrix'].tolist()
+        #         }
+                
+        #         summary_results['chb03_test_results'] = chb03_converted
+                
+        #         print(f"\n✅ chb03测试完成！")
+                
+        #     else:
+        #         print(f"\n❌ 未找到最佳模型文件: {best_model_path}")
+                
+        # except Exception as e:
+        #     print(f"\n❌ chb03测试失败: {e}")
+    
     # 10. 绘制所有折的训练曲线
     plot_kfold_training_history(all_fold_histories, n_folds)
     
@@ -1218,6 +1306,26 @@ def main():
         json.dump(summary_results, f, indent=2)
     
     print("\n✅ K折交叉验证完成！结果已保存到 kfold_training_results.json")
+    
+    # # 14. 打印chb03测试结果摘要
+    # if 'chb03_test_results' in summary_results:
+    #     print("\n" + "="*70)
+    #     print("chb03测试结果摘要")
+    #     print("="*70)
+    #     chb03 = summary_results['chb03_test_results']
+    #     print(f"\n测试病人: {chb03['test_patient']}")
+    #     print(f"使用模型: 第 {chb03['best_fold']} 折")
+    #     print(f"\n性能指标:")
+    #     print(f"  Accuracy:  {chb03['accuracy']:.4f}")
+    #     print(f"  Precision: {chb03['precision']:.4f}")
+    #     print(f"  Recall:    {chb03['recall']:.4f}")
+    #     print(f"  F1 Score:  {chb03['f1']:.4f}")
+    #     print(f"  AUC:       {chb03['auc']:.4f}")
+    #     print(f"\n混淆矩阵:")
+    #     cm = np.array(chb03['confusion_matrix'])
+    #     print(f"         预测非发作  预测发作")
+    #     print(f"实际非发作:   {cm[0,0]:5d}      {cm[0,1]:5d}")
+    #     print(f"实际发作:     {cm[1,0]:5d}      {cm[1,1]:5d}")
 
 
 if __name__ == "__main__":
