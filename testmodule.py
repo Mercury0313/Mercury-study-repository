@@ -540,66 +540,184 @@ def load_all_patients_data(patient_ids, base_data_dir, stft_subdir="stft_data"):
     
     return all_stft_files, all_seizure_times
 
-class DCRNNForSTFT(nn.Module):
+class RDANet(nn.Module):
     """
-    适配STFT输入的DCRNN模型（显存优化版）
+    RDANet模型，用于脑电信号频谱图分类
     """
-    def __init__(self, input_size, hidden_size=64, num_layers=1, 
-                 num_classes=2, dropout=0.3):
+    def __init__(self, in_channels=16, num_classes=2, dropout=0.3):
         super().__init__()
         
-        self.input_size = input_size
-        self.hidden_size = hidden_size
-        
-        # 输入投影（降维）- 先大幅降维
-        self.input_proj = nn.Sequential(
-            nn.Linear(input_size, 256),  # 先降到256
-            nn.BatchNorm1d(256),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(256, hidden_size),  # 再降到64
-            nn.BatchNorm1d(hidden_size),
+        # 初始卷积层 - 不使用池化，避免维度过小
+        self.initial_conv = nn.Sequential(
+            nn.Conv2d(in_channels, 64, kernel_size=(3, 3), padding=1),
+            nn.BatchNorm2d(64),
             nn.ReLU(),
             nn.Dropout(dropout)
         )
         
-        # 单向LSTM（显存更少）
-        self.lstm = nn.LSTM(
-            input_size=hidden_size,
-            hidden_size=hidden_size,
-            num_layers=num_layers,
-            batch_first=True,
-            bidirectional=False,  # 改为单向
-            dropout=dropout if num_layers > 1 else 0
-        )
-        
-        # 简化分类器
-        self.classifier = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size // 2),
+        # 调整卷积
+        self.adjust_conv = nn.Sequential(
+            nn.Conv2d(64, 64, kernel_size=(3, 3), padding=1),
+            nn.BatchNorm2d(64),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_size // 2, num_classes)
+            nn.Conv2d(64, 64, kernel_size=(3, 3), padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.Dropout(dropout)
         )
         
+        # 四个残差块
+        self.residual_blocks = nn.Sequential(
+            ResidualBlock(64, 64, dropout),
+            ResidualBlock(64, 64, dropout),
+            ResidualBlock(64, 64, dropout),
+            ResidualBlock(64, 64, dropout)
+        )
+        
+        # 注意力模块
+        self.channel_attention = ChannelAttention(64)
+        self.spatial_attention = SpatialAttention()
+        
+        # 全局平均池化和分类器
+        self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(64, 128),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(128, num_classes)
+        )
+    
     def forward(self, x):
-        # x: (batch, time, features)
-        batch_size, time_steps, features = x.shape
+        # 输入形状: (batch, time, features)
+        # 转换为: (batch, features, time) -> (batch, features, time, 1) -> (batch, features, 1, time)
+        x = x.permute(0, 2, 1).unsqueeze(2)
         
-        # 输入投影
-        x_reshaped = x.reshape(-1, features)
-        x_proj = self.input_proj(x_reshaped)
-        x = x_proj.reshape(batch_size, time_steps, -1)
+        # 初始卷积
+        x = self.initial_conv(x)
         
-        # LSTM
-        lstm_out, (hidden, cell) = self.lstm(x)
+        # 调整卷积
+        x = self.adjust_conv(x)
         
-        # 使用最后一个时间步的输出
-        last_output = lstm_out[:, -1, :]  # (batch, hidden)
+        # 残差块
+        x = self.residual_blocks(x)
+        
+        # 通道注意力
+        x = self.channel_attention(x)
+        
+        # 空间注意力
+        x = self.spatial_attention(x)
+        
+        # 全局平均池化
+        x = self.global_avg_pool(x)
         
         # 分类
-        output = self.classifier(last_output)
+        output = self.classifier(x)
         
         return output
+
+
+class ResidualBlock(nn.Module):
+    """
+    残差块
+    """
+    def __init__(self, in_channels, out_channels, dropout=0.3):
+        super().__init__()
+        
+        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=(3, 3), padding=1)
+        self.bn1 = nn.BatchNorm2d(out_channels)
+        self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(dropout)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=(3, 3), padding=1)
+        self.bn2 = nn.BatchNorm2d(out_channels)
+        
+        #  shortcut连接
+        if in_channels != out_channels:
+            self.shortcut = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, kernel_size=(1, 1)),
+                nn.BatchNorm2d(out_channels)
+            )
+        else:
+            self.shortcut = nn.Identity()
+    
+    def forward(self, x):
+        residual = self.shortcut(x)
+        
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.dropout(x)
+        
+        x = self.conv2(x)
+        x = self.bn2(x)
+        
+        x += residual
+        x = self.relu(x)
+        
+        return x
+
+
+class ChannelAttention(nn.Module):
+    """
+    通道注意力模块
+    """
+    def __init__(self, in_channels, reduction_ratio=16):
+        super().__init__()
+        
+        self.avg_pool = nn.AdaptiveAvgPool2d((1, 1))
+        self.max_pool = nn.AdaptiveMaxPool2d((1, 1))
+        
+        self.fc1 = nn.Linear(in_channels, in_channels // reduction_ratio)
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Linear(in_channels // reduction_ratio, in_channels)
+        self.sigmoid = nn.Sigmoid()
+    
+    def forward(self, x):
+        batch_size, channels, height, width = x.shape
+        
+        # 平均池化路径
+        avg_out = self.avg_pool(x).view(batch_size, channels)
+        avg_out = self.fc1(avg_out)
+        avg_out = self.relu(avg_out)
+        avg_out = self.fc2(avg_out)
+        
+        # 最大池化路径
+        max_out = self.max_pool(x).view(batch_size, channels)
+        max_out = self.fc1(max_out)
+        max_out = self.relu(max_out)
+        max_out = self.fc2(max_out)
+        
+        # 融合
+        out = avg_out + max_out
+        out = self.sigmoid(out).view(batch_size, channels, 1, 1)
+        
+        return x * out
+
+
+class SpatialAttention(nn.Module):
+    """
+    空间注意力模块
+    """
+    def __init__(self, kernel_size=7):
+        super().__init__()
+        
+        self.conv = nn.Conv2d(2, 1, kernel_size=kernel_size, padding=kernel_size//2)
+        self.sigmoid = nn.Sigmoid()
+    
+    def forward(self, x):
+        # 通道维度的平均池化
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        # 通道维度的最大池化
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+        # 拼接
+        out = torch.cat([avg_out, max_out], dim=1)
+        # 卷积
+        out = self.conv(out)
+        # 激活
+        out = self.sigmoid(out)
+        
+        return x * out
 
 # ========== 2. 训练函数 ==========
 
@@ -696,9 +814,9 @@ def train_model(model, train_loader, val_loader, epochs=50, lr=0.001, device='cu
             best_val_loss = avg_val_loss
             # 根据是否为K折交叉验证选择不同的文件名
             if fold is not None:
-                model_path = f'best_dcrnn_model_fold{fold+1}.pth'
+                model_path = f'best_rdanet_model_fold{fold+1}.pth'
             else:
-                model_path = 'best_dcrnn_model.pth'
+                model_path = 'best_rdanet_model.pth'
             torch.save(model.state_dict(), model_path)
         
         # 打印进度
@@ -1024,7 +1142,7 @@ def test_model(model, test_loader, device='cuda'):
 
 def main():
     print("\n" + "="*70)
-    print("开始训练DCRNN模型 on chb01-03 STFT数据 (K折交叉验证)")
+    print("开始训练RDANet模型 on chb01-03 STFT数据 (K折交叉验证)")
     print("="*70)
     
     # 1. 设置基础路径
@@ -1115,10 +1233,8 @@ def main():
         test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
         
         # 初始化模型
-        model = DCRNNForSTFT(
-            input_size=features,
-            hidden_size=128,
-            num_layers=2,
+        model = RDANet(
+            in_channels=features,
             num_classes=2,
             dropout=0.3
         ).to(device)
@@ -1137,7 +1253,7 @@ def main():
         )
         
         # 加载最佳模型并测试
-        model_path = f'best_dcrnn_model_fold{fold+1}.pth'
+        model_path = f'best_rdanet_model_fold{fold+1}.pth'
         if Path(model_path).exists():
             model.load_state_dict(torch.load(model_path))
             test_results = test_model(model, test_loader, device)
