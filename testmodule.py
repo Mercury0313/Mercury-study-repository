@@ -1111,6 +1111,13 @@ def test_model(model, test_loader, device='cuda'):
     f1 = f1_score(all_labels, all_preds, average='binary', zero_division=0)
     cm = confusion_matrix(all_labels, all_preds)
     
+    # 计算敏感性和特异性
+    # 敏感性 = TP / (TP + FN) = 召回率，表示发作样本被正确识别的比例
+    # 特异性 = TN / (TN + FP)，表示非发作样本被正确识别的比例
+    tn, fp, fn, tp = cm.ravel()
+    sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0.0  # 敏感性
+    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0  # 特异性
+    
     # 计算AUC
     from sklearn.metrics import roc_auc_score
     auc = roc_auc_score(all_labels, all_probs)
@@ -1118,11 +1125,13 @@ def test_model(model, test_loader, device='cuda'):
     print("\n" + "="*60)
     print("测试结果")
     print("="*60)
-    print(f"Accuracy:  {accuracy:.4f}")
-    print(f"Precision: {precision:.4f}")
-    print(f"Recall:    {recall:.4f}")
-    print(f"F1 Score:  {f1:.4f}")
-    print(f"AUC:       {auc:.4f}")
+    print(f"Accuracy:    {accuracy:.4f}")
+    print(f"Precision:   {precision:.4f}")
+    print(f"Recall:      {recall:.4f}")
+    print(f"F1 Score:    {f1:.4f}")
+    print(f"Sensitivity: {sensitivity:.4f}  (发作样本正确识别率)")
+    print(f"Specificity: {specificity:.4f}  (非发作样本正确识别率)")
+    print(f"AUC:         {auc:.4f}")
     print("\n混淆矩阵:")
     print(f"         预测非发作  预测发作")
     print(f"实际非发作:   {cm[0,0]:5d}      {cm[0,1]:5d}")
@@ -1133,6 +1142,8 @@ def test_model(model, test_loader, device='cuda'):
         'precision': precision,
         'recall': recall,
         'f1': f1,
+        'sensitivity': sensitivity,
+        'specificity': specificity,
         'auc': auc,
         'confusion_matrix': cm
     }
@@ -1277,20 +1288,26 @@ def main():
     avg_precision = np.mean([r['precision'] for r in all_fold_results])
     avg_recall = np.mean([r['recall'] for r in all_fold_results])
     avg_f1 = np.mean([r['f1'] for r in all_fold_results])
+    avg_sensitivity = np.mean([r['sensitivity'] for r in all_fold_results])
+    avg_specificity = np.mean([r['specificity'] for r in all_fold_results])
     avg_auc = np.mean([r['auc'] for r in all_fold_results])
     
     std_accuracy = np.std([r['accuracy'] for r in all_fold_results])
     std_precision = np.std([r['precision'] for r in all_fold_results])
     std_recall = np.std([r['recall'] for r in all_fold_results])
     std_f1 = np.std([r['f1'] for r in all_fold_results])
+    std_sensitivity = np.std([r['sensitivity'] for r in all_fold_results])
+    std_specificity = np.std([r['specificity'] for r in all_fold_results])
     std_auc = np.std([r['auc'] for r in all_fold_results])
     
     print(f"\n平均指标:")
-    print(f"  Accuracy:  {avg_accuracy:.4f} ± {std_accuracy:.4f}")
-    print(f"  Precision: {avg_precision:.4f} ± {std_precision:.4f}")
-    print(f"  Recall:    {avg_recall:.4f} ± {std_recall:.4f}")
-    print(f"  F1 Score:  {avg_f1:.4f} ± {std_f1:.4f}")
-    print(f"  AUC:       {avg_auc:.4f} ± {std_auc:.4f}")
+    print(f"  Accuracy:    {avg_accuracy:.4f} ± {std_accuracy:.4f}")
+    print(f"  Precision:   {avg_precision:.4f} ± {std_precision:.4f}")
+    print(f"  Recall:      {avg_recall:.4f} ± {std_recall:.4f}")
+    print(f"  F1 Score:    {avg_f1:.4f} ± {std_f1:.4f}")
+    print(f"  Sensitivity: {avg_sensitivity:.4f} ± {std_sensitivity:.4f}  (发作样本正确识别率)")
+    print(f"  Specificity: {avg_specificity:.4f} ± {std_specificity:.4f}  (非发作样本正确识别率)")
+    print(f"  AUC:         {avg_auc:.4f} ± {std_auc:.4f}")
     
     # 12. 选择最佳模型
     print("\n" + "="*70)
