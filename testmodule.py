@@ -603,11 +603,12 @@ class RDANet(nn.Module):
         # 残差块
         x = self.residual_blocks(x)
         
-        # 通道注意力
-        x = self.channel_attention(x)
+        # 通道注意力与空间注意力的组合
         
-        # 空间注意力
-        x = self.spatial_attention(x)
+        x1 = self.channel_attention(x)
+        x2 =self.spatial_attention(x)
+        x=x1+x2
+        
         
         # 全局平均池化
         x = self.global_avg_pool(x)

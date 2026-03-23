@@ -232,61 +232,7 @@ def extract_all_patients_22channels(data_path, standard_22, valid_patients):
             patient_path, standard_22
         )
         
-    #     if patient_data and patient_data.get('files'):  # 检查是否有文件
-    #         all_patients_data[patient] = patient_data
-            
-    #         # 统计信息
-    #         total_files = len(patient_data['files'])
-    #         total_duration = 0
-    #         channels_complete = True
-            
-    #         for file_info in patient_data['files']:
-    #             if 'duration' in file_info:
-    #                 total_duration += file_info['duration']
-    #             elif 'chunks' in file_info:
-    #                 # 对于分块文件，duration已经在file_info中
-    #                 total_duration += file_info['duration']
-                
-    #             # 检查通道完整性
-    #             if len(file_info.get('channels', [])) != 22:
-    #                 channels_complete = False
-            
-    #         extraction_summary.append({
-    #             'patient': patient,
-    #             'files': total_files,
-    #             'total_duration_hours': total_duration / 3600,
-    #             'channels_complete': channels_complete,
-    #             'avg_channels': 22.0  # 应该都是22
-    #         })
-            
-    #         print(f"\n✅ {patient}:")
-    #         print(f"  文件数: {total_files}")
-    #         print(f"  总时长: {total_duration/3600:.2f}小时")
-    #         print(f"  通道完整: {channels_complete}")
-            
-    #     else:
-    #         print(f"\n❌ {patient}: 没有成功提取任何文件")
     
-    # # 创建汇总DataFrame
-    # if extraction_summary:
-    #     summary_df = pd.DataFrame(extraction_summary)
-        
-    #     print("\n" + "=" * 70)
-    #     print("提取完成统计")
-    #     print("=" * 70)
-    #     print(f"成功提取患者数: {len(all_patients_data)}/{len(valid_patients)}")
-    #     print(f"总文件数: {summary_df['files'].sum()}")
-    #     print(f"总数据时长: {summary_df['total_duration_hours'].sum():.2f}小时")
-    #     print(f"平均每患者文件数: {summary_df['files'].mean():.1f}")
-        
-    #     # 显示详细统计
-    #     print("\n患者详情:")
-    #     print(summary_df.to_string(index=False))
-        
-    #     return all_patients_data, summary_df
-    # else:
-    #     print("\n❌ 没有成功提取任何数据")
-    #     return {}, pd.DataFrame()
 def reconstruct_patient_data(patient_id, save_dir="extracted_data"):
     """
     重建完整的患者数据
