@@ -303,7 +303,8 @@ class EEG2STFTConverter:
     """
     
     def __init__(self, npz_file, sfreq=256, window_lengths=[5, 15, 30], 
-                 nperseg=256, noverlap=128, output_dir='stft_data', seizure_times=None):
+                 nperseg=256, noverlap=128, output_dir='stft_data', seizure_times=None,
+                 global_preictal_duration=None, global_interictal_duration=None, valid_ranges=None):
         """
         参数:
             npz_file: 输入的.npz文件路径
@@ -313,6 +314,9 @@ class EEG2STFTConverter:
             noverlap: STFT窗口重叠
             output_dir: 输出目录
             seizure_times: 发作时间列表，每个元素为(start, end)秒
+            global_preictal_duration: 全局发作前期总时长
+            global_interictal_duration: 全局发作间期总时长
+            valid_ranges: 预计算的有效时间段列表
         """
         self.npz_file = npz_file
         self.sfreq = sfreq
@@ -322,12 +326,19 @@ class EEG2STFTConverter:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.seizure_times = seizure_times
+        self.global_preictal_duration = global_preictal_duration
+        self.global_interictal_duration = global_interictal_duration
         
         # 加载数据
         self._load_data()
         
-        # 计算有效时间段
-        if seizure_times:
+        # 设置有效时间段
+        if valid_ranges:
+            self.valid_time_ranges = valid_ranges
+            print(f"  使用预计算的有效时间段: {len(valid_ranges)}个范围")
+            for i, (range_type, start, end) in enumerate(valid_ranges):
+                print(f"    {i+1}. {range_type}: {start:.1f} - {end:.1f}秒")
+        elif seizure_times:
             self.valid_time_ranges = self._compute_valid_time_ranges()
         else:
             self.valid_time_ranges = None
@@ -445,30 +456,93 @@ class EEG2STFTConverter:
             window_times: 每个窗口的开始时间
         """
         window_samples = int(window_sec * self.sfreq)
-        stride_samples = window_samples // 2  # 50%重叠
+        base_stride_samples = window_samples // 2  # 基础步长（50%重叠）
+        
+        # 计算调整因子
+        preictal_stride_samples = base_stride_samples
+        
+        if self.valid_time_ranges and self.global_preictal_duration is not None and self.global_interictal_duration is not None:
+            # 使用全局发作前期和发作间期总时长计算调整因子
+            if self.global_interictal_duration > 0:
+                adjustment_factor = max(self.global_preictal_duration / self.global_interictal_duration,0.25)
+                preictal_stride_samples = max(1, int(base_stride_samples * adjustment_factor))
+                print(f"  基础步长: {base_stride_samples}样本 ({base_stride_samples/self.sfreq:.1f}秒)")
+                print(f"  发作前期步长: {preictal_stride_samples}样本 ({preictal_stride_samples/self.sfreq:.1f}秒)")
+                print(f"  全局发作前期总时长: {self.global_preictal_duration:.1f}秒")
+                print(f"  全局发作间期总时长: {self.global_interictal_duration:.1f}秒")
+                print(f"  调整因子: {adjustment_factor:.2f}")
+        elif self.valid_time_ranges:
+            # 后备方案：使用当前文件的时长计算
+            preictal_duration = 0
+            interictal_duration = 0
+            
+            for i, (start_range, end_range) in enumerate(self.valid_time_ranges):
+                duration = end_range - start_range
+                # 偶数索引为发作前期，奇数索引为发作间期（根据compute_valid_time_ranges的输出顺序）
+                if i % 2 == 0:
+                    preictal_duration += duration
+                else:
+                    interictal_duration += duration
+            
+            if interictal_duration > 0:
+                adjustment_factor = preictal_duration / interictal_duration
+                preictal_stride_samples = max(1, int(base_stride_samples * adjustment_factor))
+                print(f"  基础步长: {base_stride_samples}样本 ({base_stride_samples/self.sfreq:.1f}秒)")
+                print(f"  发作前期步长: {preictal_stride_samples}样本 ({preictal_stride_samples/self.sfreq:.1f}秒)")
+                print(f"  当前文件发作前期总时长: {preictal_duration:.1f}秒")
+                print(f"  当前文件发作间期总时长: {interictal_duration:.1f}秒")
+                print(f"  调整因子: {adjustment_factor:.2f}")
         
         n_samples = self.eeg_data.shape[1]
         windows = []
         window_times = []
         
-        for start in range(0, n_samples - window_samples + 1, stride_samples):
+        # 遍历所有可能的窗口位置
+        start = 0
+        while start <= n_samples - window_samples:
             window_start_time = start / self.sfreq
             window_end_time = (start + window_samples) / self.sfreq
             
-            # 检查窗口是否在有效时间段内
+            # 检查窗口是否在有效时间段内，并确定使用的步长
+            use_preictal_stride = False
             if self.valid_time_ranges:
                 window_valid = False
-                for start_range, end_range in self.valid_time_ranges:
+                for i, range_info in enumerate(self.valid_time_ranges):
+                    # 检查是否包含类型信息
+                    if len(range_info) == 3:
+                        # 格式: (type, start, end)
+                        range_type, start_range, end_range = range_info
+                    else:
+                        # 旧格式: (start, end)
+                        start_range, end_range = range_info
+                        range_type = 'preictal' if i % 2 == 0 else 'interictal'
+                    
                     if window_start_time >= start_range and window_end_time <= end_range:
                         window_valid = True
+                        use_preictal_stride = (range_type == 'preictal')
                         break
                 if not window_valid:
+                    # 移动到下一个位置
+                    start += base_stride_samples
                     continue
             
+            # 提取窗口
             end = start + window_samples
             window = self.eeg_data[:, start:end]  # (22, window_samples)
             windows.append(window)
             window_times.append(window_start_time)
+            
+            if use_preictal_stride:
+                print(f"  窗口 {len(windows)}: 发作前期，步长 {preictal_stride_samples}样本 ({preictal_stride_samples/self.sfreq:.1f}秒)")
+            else:
+                print(f"  窗口 {len(windows)}: 发作间期，步长 {base_stride_samples}样本 ({base_stride_samples/self.sfreq:.1f}秒)")
+                
+
+            # 根据窗口类型选择步长
+            if use_preictal_stride:
+                start += preictal_stride_samples
+            else:
+                start += base_stride_samples
         
         windows = np.array(windows)  # (n_windows, 22, window_samples)
         print(f"  窗口长度 {window_sec}秒: {len(windows)} 个窗口")
@@ -785,6 +859,232 @@ def batch_process_stft(input_dir='extracted_data', output_dir='stft_data',
     npz_files = list(input_path.glob('**/*full.npz'))
     print(f"找到 {len(npz_files)} 个.npz文件")
     
+    # 计算所有样本的发作前期和发作间期总时长
+    global_preictal_duration = 0
+    global_interictal_duration = 0
+    
+    print(f"\n{'='*60}")
+    print("计算全局发作前期和发作间期总时长")
+    print(f"{'='*60}")
+    
+    # 首先收集所有发作时间
+    all_seizure_times = {}
+    for npz_file in npz_files:
+        patient_dir = npz_file.parent.name
+        file_stem = npz_file.stem
+        edf_file_name = file_stem.replace('_full', '.edf')
+        
+        summary_file = f"D:/Graduation_thesis/data/chb-mit-scalp-eeg-database-1.0.0/{patient_dir}/{patient_dir}-summary.txt"
+        file_seizure_times, _ = parse_chb_summary(summary_file)
+        all_seizure_times.update(file_seizure_times)
+    
+    # 为每个患者收集所有文件的时间信息
+    patient_files = {}
+    for npz_file in npz_files:
+        patient_dir = npz_file.parent.name
+        file_stem = npz_file.stem
+        edf_file_name = file_stem.replace('_full', '.edf')
+        
+        # 从summary.txt获取文件信息
+        summary_file = f"D:/Graduation_thesis/data/chb-mit-scalp-eeg-database-1.0.0/{patient_dir}/{patient_dir}-summary.txt"
+        
+        # 读取整个文件内容
+        with open(summary_file, 'r') as f:
+            content = f.read()
+        
+        # 使用正则表达式提取文件信息
+        file_pattern = rf'File Name:\s*{edf_file_name}.*?File Start Time:\s*(\d+):(\d+):(\d+).*?File End Time:\s*(\d+):(\d+):(\d+).*?Number of Seizures in File:\s*(\d+)(.*?)(?=File Name:|\Z)'
+        file_match = re.search(file_pattern, content, re.DOTALL | re.IGNORECASE)
+        
+        if file_match:
+            # 提取开始时间
+            start_h, start_m, start_s = map(int, file_match.groups()[0:3])
+            file_start_time = start_h * 3600 + start_m * 60 + start_s
+            
+            # 提取结束时间
+            end_h, end_m, end_s = map(int, file_match.groups()[3:6])
+            file_end_time = end_h * 3600 + end_m * 60 + end_s
+            
+            # 处理跨天情况（结束时间小于开始时间）
+            if file_end_time < file_start_time:
+                file_end_time += 24 * 3600  # 加一天
+            
+            # 计算时长
+            total_duration = file_end_time - file_start_time
+            
+            # 提取发作时间
+            n_seizures = int(file_match.group(7))
+            file_content = file_match.group(8)
+            
+            if n_seizures > 0:
+                seizure_pattern = r'Seizure Start Time:\s*(\d+)\s*seconds.*?Seizure End Time:\s*(\d+)\s*seconds'
+                seizures = re.findall(seizure_pattern, file_content, re.DOTALL | re.IGNORECASE)
+                # 将相对时间转换为绝对时间
+                file_seizure_times = [(file_start_time + int(start), file_start_time + int(end)) for start, end in seizures]
+            else:
+                file_seizure_times = []
+        else:
+            # 如果正则匹配失败，使用后备方案
+            # 加载数据以获取总时长
+            print("使用备用方案")
+            data = np.load(npz_file)
+            times = data['times']
+            total_duration = times[-1]
+            file_start_time = 0
+            file_end_time = total_duration
+            file_seizure_times = all_seizure_times.get(edf_file_name, [])
+        
+        if patient_dir not in patient_files:
+            patient_files[patient_dir] = []
+        
+        patient_files[patient_dir].append({
+            'file_name': edf_file_name,
+            'npz_file': npz_file,
+            'start_time': file_start_time,
+            'end_time': file_end_time,
+            'duration': total_duration,
+            'seizure_times': file_seizure_times
+        })
+    
+    # 对每个患者的文件按时间排序并处理跨天连续性
+    for patient_dir in patient_files:
+        files = patient_files[patient_dir]
+        # 按文件名排序（确保顺序正确）
+        files.sort(key=lambda x: x['file_name'])
+        
+        # 处理跨天连续性
+        previous_end_time = 0
+        for i, file_info in enumerate(files):
+            if i == 0:
+                # 第一个文件保持不变
+                previous_end_time = file_info['end_time']
+            else:
+                current_start = file_info['start_time']
+                # 计算时间差
+                time_diff = previous_end_time - current_start
+                
+                # 如果当前文件的开始时间小于前一个文件的结束时间，说明跨天了
+                if time_diff > 0:
+                    # 调整当前文件的时间，使其与前一个文件连续
+                    file_info['start_time'] = previous_end_time
+                    file_info['end_time'] = previous_end_time + (file_info['end_time'] - current_start)
+                    
+                    # 调整发作时间
+                    adjusted_seizures = []
+                    for start, end in file_info['seizure_times']:
+                        adjusted_start = previous_end_time + (start - current_start)
+                        adjusted_end = previous_end_time + (end - current_start)
+                        adjusted_seizures.append((adjusted_start, adjusted_end))
+                    file_info['seizure_times'] = adjusted_seizures
+                
+                previous_end_time = file_info['end_time']
+        
+        # 再次按时间排序
+        files.sort(key=lambda x: x['start_time'])
+        
+        # 打印文件时间信息
+        print(f"\n{patient_dir} 文件时间信息:")
+        for file_info in files:
+            print(f"  {file_info['file_name']}: {file_info['start_time']/3600:.2f} - {file_info['end_time']/3600:.2f}小时")
+    
+    # 计算所有文件的有效时间段
+    for patient_dir, files in patient_files.items():
+        # 获取该患者的所有发作时间
+        patient_seizures = []
+        for file_info in files:
+            patient_seizures.extend(file_info['seizure_times'])
+        # 按时间排序
+        patient_seizures.sort(key=lambda x: x[0])
+        
+        # 计算该患者的所有有效时间段
+        patient_valid_ranges = []
+        
+        if patient_seizures:
+            # 处理第一个发作
+            first_seizure_start = patient_seizures[0][0]
+            
+            # 第一个发作前的发作间期（发作前35分钟之前的时间段）
+            interictal_end = first_seizure_start - 35 * 60
+            if interictal_end > 0:
+                # 患者最早的文件开始时间
+                earliest_file_start = min([f['start_time'] for f in files])
+                interictal_start = max(earliest_file_start, 0)
+                if interictal_start < interictal_end:
+                    patient_valid_ranges.append(('interictal', interictal_start, interictal_end))
+            
+            # 第一个发作前的发作前期（如果有）
+            pre_seizure_start = max(0, first_seizure_start - 35 * 60)
+            sph_start = first_seizure_start - 5 * 60
+            
+            if pre_seizure_start < sph_start:
+                patient_valid_ranges.append(('preictal', pre_seizure_start, sph_start))
+            
+            # 处理发作间期
+            for i in range(len(patient_seizures) - 1):
+                current_seizure_end = patient_seizures[i][1]
+                next_seizure_start = patient_seizures[i+1][0]
+                
+                # 发作间期：当前发作结束后30分钟至下一次发作开始前30分钟
+                interictal_start = current_seizure_end + 30 * 60
+                interictal_end = next_seizure_start - 30 * 60
+                
+                if interictal_start < interictal_end:
+                    patient_valid_ranges.append(('interictal', interictal_start, interictal_end))
+                
+                # 下一次发作的发作前期（排除SPH）
+                pre_seizure_start = max(interictal_end, next_seizure_start - 35 * 60)
+                sph_start = next_seizure_start - 5 * 60
+                
+                if pre_seizure_start < sph_start:
+                    patient_valid_ranges.append(('preictal', pre_seizure_start, sph_start))
+            
+            # 处理最后一个发作后的发作间期
+            last_seizure_end = patient_seizures[-1][1]
+            # 计算患者最后一个文件的结束时间
+            last_file_end = max([f['end_time'] for f in files])
+            interictal_start = last_seizure_end + 30 * 60
+            if interictal_start < last_file_end:
+                patient_valid_ranges.append(('interictal', interictal_start, last_file_end))
+        
+        # 为每个文件计算有效时间段
+        for file_info in files:
+            file_start = file_info['start_time']
+            file_end = file_info['end_time']
+            
+            # 计算该文件内的有效时间段
+            file_valid_ranges = []
+            for range_type, range_start, range_end in patient_valid_ranges:
+                # 计算文件与有效范围的交集
+                overlap_start = max(file_start, range_start)
+                overlap_end = min(file_end, range_end)
+                
+                if overlap_start < overlap_end:
+                    # 计算在文件内的相对时间
+                    relative_start = overlap_start - file_start
+                    relative_end = overlap_end - file_start
+                    file_valid_ranges.append((range_type, relative_start, relative_end))
+            
+            # 计算该文件的发作前期和发作间期时长
+            file_preictal = 0
+            file_interictal = 0
+            
+            for range_type, start, end in file_valid_ranges:
+                duration = end - start
+                if range_type == 'preictal':
+                    file_preictal += duration
+                elif range_type == 'interictal':
+                    file_interictal += duration
+            
+            # 更新全局时长
+            global_preictal_duration += file_preictal
+            global_interictal_duration += file_interictal
+            
+            # 存储文件的有效时间段信息
+            file_info['valid_ranges'] = file_valid_ranges
+    
+    print(f"全局发作前期总时长: {global_preictal_duration:.1f}秒")
+    print(f"全局发作间期总时长: {global_interictal_duration:.1f}秒")
+    
     all_results = {}
     
     for npz_file in npz_files:
@@ -793,16 +1093,26 @@ def batch_process_stft(input_dir='extracted_data', output_dir='stft_data',
         edf_file_name = file_stem.replace('_full', '.edf')
         
         summary_file = f"D:/Graduation_thesis/data/chb-mit-scalp-eeg-database-1.0.0/{patient_dir}/{patient_dir}-summary.txt"
-        #summary_file = "D:\Graduation_thesis\data\chb-mit-scalp-eeg-database-1.0.0\chb01\chb01-summary.txt"
-        seizure_times,_=parse_chb_summary(summary_file)
+        file_seizure_times, _ = parse_chb_summary(summary_file)
         # 获取当前文件的发作时间
-        file_seizure_times = None
-        if seizure_times and edf_file_name in seizure_times:
-            file_seizure_times = seizure_times[edf_file_name]
+        current_file_seizure_times = file_seizure_times.get(edf_file_name, None)
         
         print(f"\n{'#'*60}")
         print(f"处理: {patient_dir}/{file_stem}")
         print(f"{'#'*60}")
+        
+        # 找到当前文件的信息
+        current_file_info = None
+        for file_info in patient_files[patient_dir]:
+            if file_info['npz_file'] == npz_file:
+                current_file_info = file_info
+                break
+        
+        # 提取有效时间段信息
+        valid_ranges = None
+        if current_file_info and 'valid_ranges' in current_file_info:
+            # 保留类型信息
+            valid_ranges = current_file_info['valid_ranges']
         
         # 创建转换器
         converter = EEG2STFTConverter(
@@ -812,7 +1122,10 @@ def batch_process_stft(input_dir='extracted_data', output_dir='stft_data',
             nperseg=256,
             noverlap=128,
             output_dir=str(output_path / patient_dir),
-            seizure_times=file_seizure_times
+            seizure_times=current_file_seizure_times,
+            global_preictal_duration=global_preictal_duration,
+            global_interictal_duration=global_interictal_duration,
+            valid_ranges=valid_ranges
         )
         
         # 处理所有窗口
