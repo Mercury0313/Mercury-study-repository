@@ -105,8 +105,8 @@ class MultiFileSTFTDataset(Dataset):
                 print(f"  每个时间bin: {time_per_bin:.3f}秒")
                 
                 # 重塑数据
-                reshaped = stft_data.transpose(0, 3, 1, 2).reshape(
-                    n_windows, n_time, -1
+                reshaped = stft_data.reshape(
+                    n_windows, n_channels, -1
                 )
                 
                 print(f"  重塑后: {reshaped.shape}")
@@ -257,6 +257,17 @@ class MultiFileSTFTDataset(Dataset):
         sample = self.samples[idx]
         data = sample['data'].copy()
         
+        # 确保通道数一致（目标通道数为22）
+        target_channels = 22
+        if data.shape[0] != target_channels:
+            if data.shape[0] < target_channels:
+                # 填充通道
+                pad_channels = target_channels - data.shape[0]
+                data = np.pad(data, ((0, pad_channels), (0, 0)), mode='constant')
+            else:
+                # 截断通道
+                data = data[:target_channels, :]
+        
         # 应用标准化
         if self.normalize and self.global_mean is not None and self.global_std is not None:
             # 确保数据维度匹配
@@ -328,8 +339,8 @@ class MultiFileSTFTWithLabels(Dataset):
         self.labels = []
         self.label_info = []
         
-        seizure_count = 0
-        non_seizure_count = 0
+        preictal_count = 0  # 发作前期
+        interictal_count = 0  # 发作间期
         
         # 检查是否有样本
         if len(self.base_dataset) == 0:
@@ -344,57 +355,61 @@ class MultiFileSTFTWithLabels(Dataset):
             
             file_name = self.file_idx_to_name.get(file_idx, "")
             
-            # 判断是否为发作
-            is_seizure = 0
-            matched_time = None
+            # 判断是发作前期还是发作间期
+            label = 0  # 默认发作间期
+            matched_seizure = None
             
             if file_name in seizure_times:
-                for start, end in seizure_times[file_name]:
-                    # 如果窗口与发作区间重叠，标记为发作
-                    if (time_start <= end and time_end >= start):
-                        is_seizure = 1
-                        matched_time = (start, end)
+                for seizure_start, seizure_end in seizure_times[file_name]:
+                    # 发作前期：发作前35分钟到发作前5分钟
+                    preictal_start = max(0, seizure_start - 35 * 60)
+                    preictal_end = seizure_start - 5 * 60
+                    
+                    # 如果窗口与发作前期重叠，标记为发作前期
+                    if (time_start <= preictal_end and time_end >= preictal_start):
+                        label = 1  # 发作前期
+                        matched_seizure = (seizure_start, seizure_end)
                         break
             
-            self.labels.append(is_seizure)
+            self.labels.append(label)
             self.label_info.append({
                 'file_idx': file_idx,
                 'file_name': file_name,
                 'time_range': (time_start, time_end),
-                'label': is_seizure,
-                'matched_seizure': matched_time
+                'label': label,
+                'matched_seizure': matched_seizure
             })
             
-            if is_seizure == 1:
-                seizure_count += 1
+            if label == 1:
+                preictal_count += 1
             else:
-                non_seizure_count += 1
+                interictal_count += 1
         
         self.labels = np.array(self.labels)
         
         # 统计
         print(f"\n类别分布:")
-        print(f"  类别0 (非发作): {non_seizure_count} ({non_seizure_count/len(self.labels)*100:.2f}%)")
-        print(f"  类别1 (发作): {seizure_count} ({seizure_count/len(self.labels)*100:.2f}%)")
+        print(f"  类别0 (发作间期): {interictal_count} ({interictal_count/len(self.labels)*100:.2f}%)")
+        print(f"  类别1 (发作前期): {preictal_count} ({preictal_count/len(self.labels)*100:.2f}%)")
         
-        # 显示发作样本示例
-        if seizure_count > 0:
-            print(f"\n发作样本示例:")
-            seizure_indices = np.where(self.labels == 1)[0]
-            for i in seizure_indices[:min(10, len(seizure_indices))]:
+        # 显示发作前期样本示例
+        if preictal_count > 0:
+            print(f"\n发作前期样本示例:")
+            preictal_indices = np.where(self.labels == 1)[0]
+            for i in preictal_indices[:min(10, len(preictal_indices))]:
                 info = self.label_info[i]
                 print(f"  样本 {i}: 文件 {info['file_name']}, "
                       f"时间范围 {info['time_range'][0]:.1f}-{info['time_range'][1]:.1f}秒, "
                       f"匹配发作 {info['matched_seizure']}")
         else:
-            print("\n⚠️ 警告: 没有找到任何发作样本！")
+            print("\n⚠️ 警告: 没有找到任何发作前期样本！")
             print("请检查以下文件是否应该有发作:")
             for file_name in seizure_times.keys():
                 print(f"  - {file_name}")
         
         # 平衡类别
         self.balance_classes = balance_classes
-        if balance_classes and seizure_count > 0 and non_seizure_count > 0:
+        if balance_classes and preictal_count > 0 and interictal_count > 0:
             self._create_balanced_indices()
         else:
             print("\n⚠️ 警告: 无法平衡类别，将使用所有样本")
@@ -547,52 +562,59 @@ class RDANet(nn.Module):
     def __init__(self, in_channels=16, num_classes=2, dropout=0.3):
         super().__init__()
         
-        # 初始卷积层 - 不使用池化，避免维度过小
+        # 降维层 - 减少输入通道数
+        self.dimension_reduction = nn.Sequential(
+            nn.Conv1d(in_channels, 64, kernel_size=3, padding=1),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.Dropout(dropout)
+        )
+        
+        # 初始卷积层 - 输入通道数为64
         self.initial_conv = nn.Sequential(
-            nn.Conv2d(in_channels, 64, kernel_size=(3, 3), padding=1),
-            nn.BatchNorm2d(64),
+            nn.Conv2d(1, 32, kernel_size=(3, 3), padding=1),
+            nn.BatchNorm2d(32),
             nn.ReLU(),
             nn.Dropout(dropout)
         )
         
         # 调整卷积
         self.adjust_conv = nn.Sequential(
-            nn.Conv2d(64, 64, kernel_size=(3, 3), padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Conv2d(64, 64, kernel_size=(3, 3), padding=1),
-            nn.BatchNorm2d(64),
+            nn.Conv2d(32, 32, kernel_size=(3, 3), padding=1),
+            nn.BatchNorm2d(32),
             nn.ReLU(),
             nn.Dropout(dropout)
         )
         
-        # 四个残差块
+        # 两个残差块
         self.residual_blocks = nn.Sequential(
-            ResidualBlock(64, 64, dropout),
-            ResidualBlock(64, 64, dropout),
-            ResidualBlock(64, 64, dropout),
-            ResidualBlock(64, 64, dropout)
+            ResidualBlock(32, 32, dropout),
+            ResidualBlock(32, 32, dropout)
         )
         
         # 注意力模块
-        self.channel_attention = ChannelAttention(64)
+        self.channel_attention = ChannelAttention(32)
         self.spatial_attention = SpatialAttention()
         
         # 全局平均池化和分类器
         self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
         self.classifier = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(64, 128),
+            nn.Linear(32, 64),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(128, num_classes)
+            nn.Linear(64, num_classes)
         )
     
     def forward(self, x):
-        # 输入形状: (batch, time, features)
-        # 转换为: (batch, features, time) -> (batch, features, time, 1) -> (batch, features, 1, time)
-        x = x.permute(0, 2, 1).unsqueeze(2)
+        # 输入形状: (batch, time, features) -> (batch, features, time)
+        x = x.permute(0, 2, 1)
+        
+        # 降维
+        x = self.dimension_reduction(x)
+        
+        # 转换为: (batch, 1, channels, time)
+        x = x.unsqueeze(1)
         
         # 初始卷积
         x = self.initial_conv(x)
@@ -604,11 +626,9 @@ class RDANet(nn.Module):
         x = self.residual_blocks(x)
         
         # 通道注意力与空间注意力的组合
-        
         x1 = self.channel_attention(x)
-        x2 =self.spatial_attention(x)
-        x=x1+x2
-        
+        x2 = self.spatial_attention(x)
+        x = x1 + x2
         
         # 全局平均池化
         x = self.global_avg_pool(x)
@@ -1161,7 +1181,7 @@ def main():
     base_data_dir = "D:/Graduation_thesis"  # 基础数据目录
     
     # 2. 指定要加载的病人
-    patient_ids = ['chb01', 'chb02']
+    patient_ids = ['chb01']
     
     # 3. 设置K折交叉验证参数
     n_folds = 5  # K折数
@@ -1186,7 +1206,8 @@ def main():
         full_dataset = MultiFileSTFTWithLabels(
             stft_files=all_stft_files,
             seizure_times=all_seizure_times,
-            window_size=30,
+            #window_size=30,
+            window_size=None,
             stride=15,
             normalize=True,
             balance_classes=True
@@ -1239,7 +1260,7 @@ def main():
         print(f"测试集大小: {len(test_dataset)}")
         
         # 创建数据加载器
-        batch_size = min(16, len(train_dataset))
+        batch_size = 16  # 最小batch size以节省内存
         train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
         val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
         test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=0)

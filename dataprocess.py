@@ -303,7 +303,7 @@ class EEG2STFTConverter:
     """
     
     def __init__(self, npz_file, sfreq=256, window_lengths=[5, 15, 30], 
-                 nperseg=256, noverlap=128, output_dir='stft_data'):
+                 nperseg=256, noverlap=128, output_dir='stft_data', seizure_times=None):
         """
         参数:
             npz_file: 输入的.npz文件路径
@@ -312,6 +312,7 @@ class EEG2STFTConverter:
             nperseg: STFT窗口长度（采样点）
             noverlap: STFT窗口重叠
             output_dir: 输出目录
+            seizure_times: 发作时间列表，每个元素为(start, end)秒
         """
         self.npz_file = npz_file
         self.sfreq = sfreq
@@ -320,9 +321,16 @@ class EEG2STFTConverter:
         self.noverlap = noverlap
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.seizure_times = seizure_times
         
         # 加载数据
         self._load_data()
+        
+        # 计算有效时间段
+        if seizure_times:
+            self.valid_time_ranges = self._compute_valid_time_ranges()
+        else:
+            self.valid_time_ranges = None
         
     def _load_data(self):
         """加载.npz文件"""
@@ -340,6 +348,67 @@ class EEG2STFTConverter:
         print(f"通道数: {len(self.channels)}")
         print(f"采样率: {self.sfreq} Hz")
         print(f"总时长: {self.times[-1]:.1f}秒 ({self.times[-1]/3600:.2f}小时)")
+    
+    def _compute_valid_time_ranges(self):
+        """
+        计算有效时间段：
+        1. 发作前期：发作前35分钟范围内
+        2. 发作间期：发作后30分钟至下一次发作开始前30分钟
+        3. 删除SPH（发作前5分钟）
+        """
+        valid_ranges = []
+        total_duration = self.times[-1]
+        
+        # 按时间排序发作时间
+        sorted_seizures = sorted(self.seizure_times, key=lambda x: x[0])
+        
+        print(f"\n{'='*60}")
+        print("计算有效时间段")
+        print(f"{'='*60}")
+        print(f"总时长: {total_duration:.1f}秒")
+        print(f"发作次数: {len(sorted_seizures)}")
+        
+        # 处理第一个发作
+        first_seizure_start = sorted_seizures[0][0]
+        
+        # 第一个发作前的发作前期（如果有）
+        pre_seizure_start = max(0, first_seizure_start - 35 * 60)  # 发作前35分钟
+        sph_start = first_seizure_start - 5 * 60  # SPH开始时间
+        
+        if pre_seizure_start < sph_start:
+            valid_ranges.append((pre_seizure_start, sph_start))
+            print(f"  发作前期1: {pre_seizure_start:.1f} - {sph_start:.1f}秒")
+        
+        # 处理发作间期
+        for i in range(len(sorted_seizures) - 1):
+            current_seizure_end = sorted_seizures[i][1]
+            next_seizure_start = sorted_seizures[i+1][0]
+            
+            # 发作间期：当前发作结束后30分钟至下一次发作开始前30分钟
+            interictal_start = current_seizure_end + 30 * 60
+            interictal_end = next_seizure_start - 30 * 60
+            
+            if interictal_start < interictal_end:
+                valid_ranges.append((interictal_start, interictal_end))
+                print(f"  发作间期{i+1}: {interictal_start:.1f} - {interictal_end:.1f}秒")
+            
+            # 下一次发作的发作前期（排除SPH）
+            pre_seizure_start = max(interictal_end, next_seizure_start - 35 * 60)
+            sph_start = next_seizure_start - 5 * 60
+            
+            if pre_seizure_start < sph_start:
+                valid_ranges.append((pre_seizure_start, sph_start))
+                print(f"  发作前期{i+2}: {pre_seizure_start:.1f} - {sph_start:.1f}秒")
+        
+        # 处理最后一个发作后的发作间期
+        last_seizure_end = sorted_seizures[-1][1]
+        interictal_start = last_seizure_end + 30 * 60
+        if interictal_start < total_duration:
+            valid_ranges.append((interictal_start, total_duration))
+            print(f"  发作间期{len(sorted_seizures)}: {interictal_start:.1f} - {total_duration:.1f}秒")
+        
+        print(f"  有效时间段数: {len(valid_ranges)}")
+        return valid_ranges
         
     def compute_stft(self, signal_data):
         """
@@ -383,10 +452,23 @@ class EEG2STFTConverter:
         window_times = []
         
         for start in range(0, n_samples - window_samples + 1, stride_samples):
+            window_start_time = start / self.sfreq
+            window_end_time = (start + window_samples) / self.sfreq
+            
+            # 检查窗口是否在有效时间段内
+            if self.valid_time_ranges:
+                window_valid = False
+                for start_range, end_range in self.valid_time_ranges:
+                    if window_start_time >= start_range and window_end_time <= end_range:
+                        window_valid = True
+                        break
+                if not window_valid:
+                    continue
+            
             end = start + window_samples
             window = self.eeg_data[:, start:end]  # (22, window_samples)
             windows.append(window)
-            window_times.append(start / self.sfreq)
+            window_times.append(window_start_time)
         
         windows = np.array(windows)  # (n_windows, 22, window_samples)
         print(f"  窗口长度 {window_sec}秒: {len(windows)} 个窗口")
@@ -634,13 +716,66 @@ class STFTDataset(Dataset):
         
         return data
 
-
+def parse_chb_summary(txt_file_path):
+    """
+    从summary.txt文件解析发作时间
+    """
+    print(f"\n从文件加载发作时间: {txt_file_path}")
+    print("="*60)
+    
+    try:
+        with open(txt_file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+    except Exception as e:
+        print(f"❌ 读取文件失败: {e}")
+        return {}, 256
+    
+    # 解析采样率
+    rate_match = re.search(r'Data Sampling Rate:\s*(\d+)\s*Hz', content)
+    sampling_rate = int(rate_match.group(1)) if rate_match else 256
+    print(f"采样率: {sampling_rate} Hz")
+    
+    # 解析发作时间
+    seizure_times = {}
+    
+    # 按文件分割
+    file_pattern = r'File Name:\s*(.+?\.edf).*?Number of Seizures in File:\s*(\d+)(.*?)(?=File Name:|\Z)'
+    file_matches = re.findall(file_pattern, content, re.DOTALL | re.IGNORECASE)
+    
+    print(f"找到 {len(file_matches)} 个文件记录")
+    
+    for file_name, n_seizures_str, file_content in file_matches:
+        file_name = file_name.strip()
+        n_seizures = int(n_seizures_str)
+        
+        if n_seizures > 0:
+            # 解析发作时间
+            seizure_pattern = r'Seizure Start Time:\s*(\d+)\s*seconds.*?Seizure End Time:\s*(\d+)\s*seconds'
+            seizures = re.findall(seizure_pattern, file_content, re.DOTALL | re.IGNORECASE)
+            
+            times = []
+            for start, end in seizures:
+                start_time = int(start)
+                end_time = int(end)
+                times.append((start_time, end_time))
+                print(f"  {file_name}: {start_time}-{end_time}秒")
+            
+            seizure_times[file_name] = times
+    
+    print(f"\n总共找到 {len(seizure_times)} 个包含发作的文件")
+    return seizure_times, sampling_rate
 # ========== 3. 批处理多个文件 ==========
 
 def batch_process_stft(input_dir='extracted_data', output_dir='stft_data', 
-                       window_lengths=[5, 15, 30]):
+                       window_lengths=[5, 15, 30], seizure_times=None):
     """
     批量处理多个.npz文件
+    
+    参数:
+        input_dir: 输入目录
+        output_dir: 输出目录
+        window_lengths: 窗口长度列表
+        seizure_times: 发作时间字典，键为文件名，值为发作时间列表
     """
     input_path = Path(input_dir)
     output_path = Path(output_dir)
@@ -655,6 +790,15 @@ def batch_process_stft(input_dir='extracted_data', output_dir='stft_data',
     for npz_file in npz_files:
         patient_dir = npz_file.parent.name
         file_stem = npz_file.stem
+        edf_file_name = file_stem.replace('_full', '.edf')
+        
+        summary_file = f"D:/Graduation_thesis/data/chb-mit-scalp-eeg-database-1.0.0/{patient_dir}/{patient_dir}-summary.txt"
+        #summary_file = "D:\Graduation_thesis\data\chb-mit-scalp-eeg-database-1.0.0\chb01\chb01-summary.txt"
+        seizure_times,_=parse_chb_summary(summary_file)
+        # 获取当前文件的发作时间
+        file_seizure_times = None
+        if seizure_times and edf_file_name in seizure_times:
+            file_seizure_times = seizure_times[edf_file_name]
         
         print(f"\n{'#'*60}")
         print(f"处理: {patient_dir}/{file_stem}")
@@ -667,7 +811,8 @@ def batch_process_stft(input_dir='extracted_data', output_dir='stft_data',
             window_lengths=window_lengths,
             nperseg=256,
             noverlap=128,
-            output_dir=str(output_path / patient_dir)
+            output_dir=str(output_path / patient_dir),
+            seizure_times=file_seizure_times
         )
         
         # 处理所有窗口
@@ -719,15 +864,15 @@ if __name__ == "__main__":
    
     
     #取消下面的注释来提取所有患者
-    extract_all_patients_22channels(
-        data_path, 
-        standard_22_channels, 
-        valid_patients
-    )
-    # 取消注释来重构患者数据
-    reconstruct_patient_data("chb01")
-    reconstruct_patient_data("chb02")
-    reconstruct_patient_data("chb03")
+    # extract_all_patients_22channels(
+    #     data_path, 
+    #     standard_22_channels, 
+    #     valid_patients
+    # )
+    # # 取消注释来重构患者数据
+    # reconstruct_patient_data("chb01")
+    # reconstruct_patient_data("chb02")
+    # reconstruct_patient_data("chb03")
     
     
 
