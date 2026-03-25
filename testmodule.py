@@ -334,6 +334,12 @@ class MultiFileSTFTWithLabels(Dataset):
             else:
                 print(f"  ❌ 索引 {idx:2d}: {base_name} -> 无发作")
         
+        # 计算所有发作时间（按时间排序）
+        all_seizure_times = []
+        for file_name, times in seizure_times.items():
+            all_seizure_times.extend(times)
+        all_seizure_times.sort(key=lambda x: x[0])
+        
         # 生成标签
         print("\n生成标签...")
         self.labels = []
@@ -359,6 +365,7 @@ class MultiFileSTFTWithLabels(Dataset):
             label = 0  # 默认发作间期
             matched_seizure = None
             
+            # 检查是否在发作前期
             if file_name in seizure_times:
                 for seizure_start, seizure_end in seizure_times[file_name]:
                     # 发作前期：发作前35分钟到发作前5分钟
@@ -369,6 +376,37 @@ class MultiFileSTFTWithLabels(Dataset):
                     if (time_start <= preictal_end and time_end >= preictal_start):
                         label = 1  # 发作前期
                         matched_seizure = (seizure_start, seizure_end)
+                        break
+            
+            # 检查是否在发作期间（应该被排除）
+            if label == 0 and file_name in seizure_times:
+                for seizure_start, seizure_end in seizure_times[file_name]:
+                    # 如果窗口与发作期间重叠，标记为发作间期
+                    if (time_start <= seizure_end and time_end >= seizure_start):
+                        label = 0  # 发作期间被排除，标记为发作间期
+                        break
+            
+            # 检查是否在发作后30分钟内（应该被排除）
+            if label == 0 and file_name in seizure_times:
+                for seizure_start, seizure_end in seizure_times[file_name]:
+                    # 发作后30分钟内
+                    post_seizure_end = seizure_end + 30 * 60
+                    # 如果窗口与发作后30分钟内重叠，标记为发作间期
+                    if (time_start <= post_seizure_end and time_end >= seizure_end):
+                        label = 0  # 发作后30分钟内被排除，标记为发作间期
+                        break
+            
+            # 检查是否在下一次发作前30分钟内（应该被排除）
+            if label == 0 and len(all_seizure_times) > 1:
+                for i in range(len(all_seizure_times) - 1):
+                    current_seizure_end = all_seizure_times[i][1]
+                    next_seizure_start = all_seizure_times[i+1][0]
+                    
+                    # 下一次发作前30分钟内
+                    pre_next_seizure_start = next_seizure_start - 30 * 60
+                    # 如果窗口与下一次发作前30分钟内重叠，标记为发作间期
+                    if (time_start <= next_seizure_start and time_end >= pre_next_seizure_start):
+                        label = 0  # 下一次发作前30分钟内被排除，标记为发作间期
                         break
             
             self.labels.append(label)

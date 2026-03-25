@@ -583,7 +583,23 @@ class EEG2STFTConverter:
                 print(f"  时间分辨率: {len(times)} bins/窗口")
         
         stft_data = np.array(stft_windows)  # (n_windows, 22, freq_bins, time_bins)
-        print(f"  STFT数据形状: {stft_data.shape}")
+        
+        # 去噪：剔除57-63Hz和117-123Hz频段的数据，以及去除直流成分
+        print("  应用去噪处理...")
+        
+        # 找到需要保留的频率索引
+        keep_indices = []
+        for i, freq in enumerate(freqs):
+            # 保留非直流成分且不在57-63Hz和117-123Hz频段的数据
+            if freq > 0 and not ((57 <= freq <= 63) or (117 <= freq <= 123)):
+                keep_indices.append(i)
+        
+        # 应用去噪
+        stft_data = stft_data[:, :, keep_indices, :]
+        freqs = freqs[keep_indices]
+        
+        print(f"  去噪后STFT数据形状: {stft_data.shape}")
+        print(f"  去噪后频率范围: {freqs[0]:.1f} - {freqs[-1]:.1f} Hz")
         
         return stft_data, freqs, window_times
     
