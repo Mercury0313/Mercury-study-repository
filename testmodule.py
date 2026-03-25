@@ -364,8 +364,46 @@ class MultiFileSTFTWithLabels(Dataset):
             # 判断是发作前期还是发作间期
             label = 0  # 默认发作间期
             matched_seizure = None
+            skip_sample = False  # 是否跳过该样本
             
-            # 检查是否在发作前期
+            # 检查是否在发作期间（应该被排除）
+            if file_name in seizure_times:
+                for seizure_start, seizure_end in seizure_times[file_name]:
+                    # 如果窗口与发作期间重叠，跳过该样本
+                    if (time_start <= seizure_end and time_end >= seizure_start):
+                        skip_sample = True
+                        break
+            
+            if skip_sample:
+                continue  # 跳过发作期间的样本
+            
+            # 检查是否在发作后30分钟内（应该被排除）
+            if file_name in seizure_times:
+                for seizure_start, seizure_end in seizure_times[file_name]:
+                    # 发作后30分钟内
+                    post_seizure_end = seizure_end + 30 * 60
+                    # 如果窗口与发作后30分钟内重叠，跳过该样本
+                    if (time_start <= post_seizure_end and time_end >= seizure_end):
+                        skip_sample = True
+                        break
+            
+            if skip_sample:
+                continue  # 跳过发作后30分钟内的样本
+            
+            # 检查是否在SPH（发作前5分钟，应该被排除）
+            if file_name in seizure_times:
+                for seizure_start, seizure_end in seizure_times[file_name]:
+                    # SPH：发作前5分钟内
+                    sph_start = seizure_start - 5 * 60
+                    # 如果窗口与SPH重叠，跳过该样本
+                    if (time_start <= seizure_start and time_end >= sph_start):
+                        skip_sample = True
+                        break
+            
+            if skip_sample:
+                continue  # 跳过SPH内的样本
+            
+            # 检查是否在发作前期（发作前35分钟到发作前5分钟）
             if file_name in seizure_times:
                 for seizure_start, seizure_end in seizure_times[file_name]:
                     # 发作前期：发作前35分钟到发作前5分钟
@@ -378,35 +416,14 @@ class MultiFileSTFTWithLabels(Dataset):
                         matched_seizure = (seizure_start, seizure_end)
                         break
             
-            # 检查是否在发作期间（应该被排除）
+            # 检查是否在发作间期（发作后30分钟至下一次发作开始前35分钟）
             if label == 0 and file_name in seizure_times:
                 for seizure_start, seizure_end in seizure_times[file_name]:
-                    # 如果窗口与发作期间重叠，标记为发作间期
-                    if (time_start <= seizure_end and time_end >= seizure_start):
-                        label = 0  # 发作期间被排除，标记为发作间期
-                        break
-            
-            # 检查是否在发作后30分钟内（应该被排除）
-            if label == 0 and file_name in seizure_times:
-                for seizure_start, seizure_end in seizure_times[file_name]:
-                    # 发作后30分钟内
-                    post_seizure_end = seizure_end + 30 * 60
-                    # 如果窗口与发作后30分钟内重叠，标记为发作间期
-                    if (time_start <= post_seizure_end and time_end >= seizure_end):
-                        label = 0  # 发作后30分钟内被排除，标记为发作间期
-                        break
-            
-            # 检查是否在下一次发作前30分钟内（应该被排除）
-            if label == 0 and len(all_seizure_times) > 1:
-                for i in range(len(all_seizure_times) - 1):
-                    current_seizure_end = all_seizure_times[i][1]
-                    next_seizure_start = all_seizure_times[i+1][0]
-                    
-                    # 下一次发作前30分钟内
-                    pre_next_seizure_start = next_seizure_start - 30 * 60
-                    # 如果窗口与下一次发作前30分钟内重叠，标记为发作间期
-                    if (time_start <= next_seizure_start and time_end >= pre_next_seizure_start):
-                        label = 0  # 下一次发作前30分钟内被排除，标记为发作间期
+                    # 发作间期：发作后30分钟至下一次发作开始前35分钟
+                    interictal_end = seizure_start - 35 * 60
+                    # 如果窗口在发作间期范围内，标记为发作间期
+                    if (time_start >= 0 and time_end <= interictal_end):
+                        label = 0  # 发作间期
                         break
             
             self.labels.append(label)

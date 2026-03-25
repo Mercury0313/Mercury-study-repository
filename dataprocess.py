@@ -1040,9 +1040,9 @@ def batch_process_stft(input_dir='extracted_data', output_dir='stft_data',
                 current_seizure_end = patient_seizures[i][1]
                 next_seizure_start = patient_seizures[i+1][0]
                 
-                # 发作间期：当前发作结束后30分钟至下一次发作开始前30分钟
+                # 发作间期：当前发作结束后30分钟至下一次发作开始前35分钟
                 interictal_start = current_seizure_end + 30 * 60
-                interictal_end = next_seizure_start - 30 * 60
+                interictal_end = next_seizure_start - 35 * 60
                 
                 if interictal_start < interictal_end:
                     patient_valid_ranges.append(('interictal', interictal_start, interictal_end))
