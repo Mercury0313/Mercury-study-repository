@@ -554,7 +554,7 @@ class EEG2STFTConverter:
         将指定窗口长度的所有窗口转换为STFT
         
         返回:
-            stft_data: 形状 (n_windows, n_channels, freq_bins, time_bins)
+            stft_data: 形状 (n_windows, n_channels, time_bins, freq_bins)
             frequencies: 频率轴
             window_times: 每个窗口的开始时间
         """
@@ -575,6 +575,8 @@ class EEG2STFTConverter:
             
             # 堆叠通道
             window_stft = np.array(channel_stfts)  # (22, freq_bins, time_bins)
+            # 转置为 (22, time_bins, freq_bins) 以匹配testmodule.py的期望
+            window_stft = window_stft.transpose(0, 2, 1)
             stft_windows.append(window_stft)
             
             if freq_bins is None:
@@ -582,7 +584,7 @@ class EEG2STFTConverter:
                 print(f"  频率分辨率: {freq_bins} bins")
                 print(f"  时间分辨率: {len(times)} bins/窗口")
         
-        stft_data = np.array(stft_windows)  # (n_windows, 22, freq_bins, time_bins)
+        stft_data = np.array(stft_windows)  # (n_windows, 22, time_bins, freq_bins)
         
         # 去噪：剔除57-63Hz和117-123Hz频段的数据，以及去除直流成分
         print("  应用去噪处理...")
@@ -595,7 +597,7 @@ class EEG2STFTConverter:
                 keep_indices.append(i)
         
         # 应用去噪
-        stft_data = stft_data[:, :, keep_indices, :]
+        stft_data = stft_data[:, :, :, keep_indices]
         freqs = freqs[keep_indices]
         
         print(f"  去噪后STFT数据形状: {stft_data.shape}")
@@ -727,34 +729,38 @@ class EEG2STFTConverter:
 
 class STFTDataset(Dataset):
     """
-    STFT时频图数据集，可直接用于神经网络
+    STFT时频图数据集，可直接用于神经网络 - 修改版：返回4D形状 (n_channels, n_time, n_freq)
     """
     
-    def __init__(self, stft_file, model_type='cnn', transform=None):
+    def __init__(self, stft_file, model_type='cnn', transform=None, normalize=True):
         """
         参数:
             stft_file: 保存的STFT .npz文件
             model_type: 'cnn', 'lstm', 'transformer'
             transform: 数据增强变换
+            normalize: 是否进行数据归一化
         """
         print(f"\n加载STFT数据集: {stft_file}")
         
         # 加载数据
         data = np.load(stft_file, allow_pickle=True)
-        self.stft_data = data['stft_data']  # (n_windows, n_channels, freq_bins, time_bins)
+        self.stft_data = data['stft_data']  # (n_windows, n_channels, time_bins, freq_bins)
         self.frequencies = data['frequencies']
         self.window_times = data['window_times']
         self.channels = data['channels']
         self.window_sec = data['window_sec']
         self.model_type = model_type
         self.transform = transform
+        self.normalize = normalize
         
+        # 数据已经是正确的形状，不需要转置
         print(f"STFT数据形状: {self.stft_data.shape}")
         print(f"频率范围: {self.frequencies[0]:.1f} - {self.frequencies[-1]:.1f} Hz")
         print(f"窗口数量: {len(self.stft_data)}")
         
         # 数据归一化
-        self._normalize()
+        if self.normalize:
+            self._normalize()
         
     def _normalize(self):
         """归一化STFT数据"""
@@ -768,34 +774,43 @@ class STFTDataset(Dataset):
     
     def __getitem__(self, idx):
         # 获取当前窗口
-        stft = self.stft_data[idx]  # (n_channels, freq_bins, time_bins)
+        stft = self.stft_data[idx]  # (n_channels, n_time, n_freq)
+        
+        # 确保通道数一致（目标通道数为22）
+        target_channels = 22
+        if stft.shape[0] != target_channels:
+            if stft.shape[0] < target_channels:
+                # 填充通道
+                pad_channels = target_channels - stft.shape[0]
+                stft = np.pad(stft, ((0, pad_channels), (0, 0), (0, 0)), mode='constant')
+            else:
+                # 截断通道
+                stft = stft[:target_channels, :, :]
         
         # 根据模型类型调整格式
         if self.model_type == 'cnn':
-            # CNN输入: (channels, freq, time) 或添加通道维度
-            # 对于2D CNN，可以处理为 (freq, time, channels)
-            # 这里我们保持 (channels, freq, time)，让模型处理
+            # CNN输入: (channels, time, freq)
             data = torch.FloatTensor(stft)
             
         elif self.model_type == 'lstm':
             # LSTM输入: (time_steps, features)
             # 将频率和通道合并为特征
-            n_channels, n_freq, n_time = stft.shape
-            data = stft.transpose(2, 0, 1).reshape(n_time, -1)  # (time, channels*freq)
+            n_channels, n_time, n_freq = stft.shape
+            data = stft.transpose(1, 0, 2).reshape(n_time, -1)  # (time, channels*freq)
             data = torch.FloatTensor(data)
             
         elif self.model_type == 'transformer':
             # Transformer输入: (seq_len, features)
             # 类似LSTM
-            n_channels, n_freq, n_time = stft.shape
-            data = stft.transpose(2, 0, 1).reshape(n_time, -1)
+            n_channels, n_time, n_freq = stft.shape
+            data = stft.transpose(1, 0, 2).reshape(n_time, -1)
             data = torch.FloatTensor(data)
             
         elif self.model_type == 'spectrogram':
-            # 作为单通道图像 (freq, time)
+            # 作为单通道图像 (time, freq)
             # 取所有通道的平均
-            data = np.mean(stft, axis=0)  # (freq, time)
-            data = torch.FloatTensor(data[np.newaxis, :, :])  # (1, freq, time)
+            data = np.mean(stft, axis=0)  # (time, freq)
+            data = torch.FloatTensor(data[np.newaxis, :, :])  # (1, time, freq)
             
         else:
             data = torch.FloatTensor(stft)
@@ -1185,7 +1200,7 @@ if __name__ == "__main__":
     ]
     
     # 定义有效患者（排除chb12和13）
-    valid_patients = [f"chb{i:02d}" for i in range(1, 4) if i not in [12, 13]]
+    valid_patients = [f"chb{i:02d}" for i in range(1, 8) if i not in [12, 13]]
     #valid_patients = [f"chb{i:02d}" for i in range(3, 3) ]
     # 数据路径
     data_path = "D:/Graduation_thesis/data/chb-mit-scalp-eeg-database-1.0.0"
@@ -1202,6 +1217,15 @@ if __name__ == "__main__":
     # reconstruct_patient_data("chb01")
     # reconstruct_patient_data("chb02")
     # reconstruct_patient_data("chb03")
+    # reconstruct_patient_data("chb04")
+    # reconstruct_patient_data("chb05")
+    # reconstruct_patient_data("chb06")
+    # reconstruct_patient_data("chb07")
+   
+  
+    
+    
+
     
     
 

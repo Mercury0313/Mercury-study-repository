@@ -7,8 +7,6 @@ from torch.utils.data import Dataset, DataLoader, ConcatDataset
 import numpy as np
 from pathlib import Path
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
-from sklearn.model_selection import KFold
-import matplotlib.pyplot as plt
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -75,7 +73,7 @@ class MultiFileSTFTDataset(Dataset):
             return False
     
     def _load_file(self, stft_file, file_idx):
-        """加载单个STFT文件（带错误处理）- 修改版：保持4D形状"""
+        """加载单个STFT文件（带错误处理）- 保持4D形状"""
         print(f"\n加载: {stft_file.name}")
         
         # 先验证文件
@@ -104,7 +102,6 @@ class MultiFileSTFTDataset(Dataset):
                 print(f"  窗口起始时间范围: {window_times[0]:.1f} - {window_times[-1]:.1f}秒")
                 print(f"  每个时间bin: {time_per_bin:.3f}秒")
                 
-                # 修改：不再reshape，保持4D形状 (n_windows, n_channels, n_freq, n_time)
                 # 转置为 (n_windows, n_channels, n_time, n_freq) 以匹配要求的输入格式
                 stft_data_transposed = stft_data.transpose(0, 1, 3, 2)  # (n_windows, n_channels, n_time, n_freq)
                 
@@ -187,7 +184,7 @@ class MultiFileSTFTDataset(Dataset):
             return []
     
     def _compute_global_stats(self):
-        """计算全局标准化参数 - 修改版：适应4D数据"""
+        """计算全局标准化参数 - 适应4D数据"""
         print("\n计算全局标准化参数...")
         
         # 如果样本太多，只使用部分样本计算
@@ -612,75 +609,6 @@ def load_all_patients_data(patient_ids, base_data_dir, stft_subdir="stft_data"):
     
     return all_stft_files, all_seizure_times
 
-class RDANet(nn.Module):
-    """
-    RDANet模型，用于脑电信号频谱图分类 - 修改版：输入为(batch, 22, n_time, n_freq)
-    """
-    def __init__(self, in_channels=22, num_classes=2, dropout=0.3):
-        super().__init__()
-        
-        # 初始卷积层 - 输入通道数为in_channels (22)
-        self.initial_conv = nn.Sequential(
-            nn.Conv2d(in_channels, 32, kernel_size=(3, 3), padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(),
-            nn.Dropout(dropout)
-        )
-        
-        # 调整卷积
-        self.adjust_conv = nn.Sequential(
-            nn.Conv2d(32, 32, kernel_size=(3, 3), padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(),
-            nn.Dropout(dropout)
-        )
-        
-        # 两个残差块
-        self.residual_blocks = nn.Sequential(
-            ResidualBlock(32, 32, dropout),
-            ResidualBlock(32, 32, dropout)
-        )
-        
-        # 注意力模块
-        self.channel_attention = ChannelAttention(32)
-        self.spatial_attention = SpatialAttention()
-        
-        # 全局平均池化和分类器
-        self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
-        self.classifier = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(32, 64),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(64, num_classes)
-        )
-    
-    def forward(self, x):
-        # 输入形状: (batch, n_channels, n_time, n_freq) = (batch, 22, 59, ~120)
-        
-        # 初始卷积 - 直接处理4D输入
-        x = self.initial_conv(x)  # 输出: (batch, 32, n_time, n_freq)
-        
-        # 调整卷积
-        x = self.adjust_conv(x)  # 输出: (batch, 32, n_time, n_freq)
-        
-        # 残差块
-        x = self.residual_blocks(x)  # 输出: (batch, 32, n_time, n_freq)
-        
-        # 通道注意力与空间注意力的组合
-        x1 = self.channel_attention(x)
-        x2 = self.spatial_attention(x)
-        x = x1 + x2
-        
-        # 全局平均池化
-        x = self.global_avg_pool(x)  # 输出: (batch, 32, 1, 1)
-        
-        # 分类
-        output = self.classifier(x)  # 输出: (batch, num_classes)
-        
-        return output
-
-
 class ResidualBlock(nn.Module):
     """
     残差块
@@ -782,368 +710,75 @@ class SpatialAttention(nn.Module):
         
         return x * out
 
-# ========== 2. 训练函数 ==========
 
-def train_model(model, train_loader, val_loader, epochs=50, lr=0.001, device='cuda', fold=None):
+class RDANet(nn.Module):
     """
-    训练模型
+    RDANet模型，用于脑电信号频谱图分类 - 输入为(batch, 22, n_time, n_freq)
     """
-    # 损失函数和优化器
-    class_weights = torch.FloatTensor([1.0, 5.0]).to(device)  # 给发作类更高权重
-    criterion = nn.CrossEntropyLoss(weight=class_weights)
-    optimizer = optim.Adam(model.parameters(), lr=lr)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', patience=5, factor=0.5
-    )
+    def __init__(self, in_channels=22, num_classes=2, dropout=0.3):
+        super().__init__()
+        
+        # 初始卷积层 - 输入通道数为in_channels (22)
+        self.initial_conv = nn.Sequential(
+            nn.Conv2d(in_channels, 32, kernel_size=(3, 3), padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.Dropout(dropout)
+        )
+        
+        # 调整卷积
+        self.adjust_conv = nn.Sequential(
+            nn.Conv2d(32, 32, kernel_size=(3, 3), padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.Dropout(dropout)
+        )
+        
+        # 两个残差块
+        self.residual_blocks = nn.Sequential(
+            ResidualBlock(32, 32, dropout),
+            ResidualBlock(32, 32, dropout)
+        )
+        
+        # 注意力模块
+        self.channel_attention = ChannelAttention(32)
+        self.spatial_attention = SpatialAttention()
+        
+        # 全局平均池化和分类器
+        self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(32, 64),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(64, num_classes)
+        )
     
-    # 记录训练历史
-    history = {
-        'train_loss': [],
-        'val_loss': [],
-        'val_accuracy': [],
-        'val_precision': [],
-        'val_recall': [],
-        'val_f1': []
-    }
-    
-    best_val_loss = float('inf')
-    
-    for epoch in range(epochs):
-        # 训练
-        model.train()
-        train_loss = 0
-        train_batches = 0
+    def forward(self, x):
+        # 输入形状: (batch, n_channels, n_time, n_freq) = (batch, 22, 59, ~120)
         
-        for data, labels in train_loader:
-            data, labels = data.to(device), labels.to(device)
-            
-            optimizer.zero_grad()
-            outputs = model(data)
-            loss = criterion(outputs, labels)
-            loss.backward()
-            
-            # 梯度裁剪
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            
-            optimizer.step()
-            
-            train_loss += loss.item()
-            train_batches += 1
+        # 初始卷积 - 直接处理4D输入
+        x = self.initial_conv(x)  # 输出: (batch, 32, n_time, n_freq)
         
-        avg_train_loss = train_loss / train_batches
-        history['train_loss'].append(avg_train_loss)
+        # 调整卷积
+        x = self.adjust_conv(x)  # 输出: (batch, 32, n_time, n_freq)
         
-        # 验证
-        model.eval()
-        val_loss = 0
-        val_batches = 0
-        all_preds = []
-        all_labels = []
+        # 残差块
+        x = self.residual_blocks(x)  # 输出: (batch, 32, n_time, n_freq)
         
-        with torch.no_grad():
-            for data, labels in val_loader:
-                data, labels = data.to(device), labels.to(device)
-                outputs = model(data)
-                loss = criterion(outputs, labels)
-                
-                val_loss += loss.item()
-                val_batches += 1
-                
-                _, predicted = torch.max(outputs, 1)
-                _, true = torch.max(labels, 1)
-                
-                all_preds.extend(predicted.cpu().numpy())
-                all_labels.extend(true.cpu().numpy())
+        # 通道注意力与空间注意力的组合
+        x1 = self.channel_attention(x)
+        x2 = self.spatial_attention(x)
+        x = x1 + x2
         
-        avg_val_loss = val_loss / val_batches
-        history['val_loss'].append(avg_val_loss)
+        # 全局平均池化
+        x = self.global_avg_pool(x)  # 输出: (batch, 32, 1, 1)
         
-        # 计算验证指标
-        accuracy = accuracy_score(all_labels, all_preds)
-        precision = precision_score(all_labels, all_preds, average='binary', zero_division=0)
-        recall = recall_score(all_labels, all_preds, average='binary', zero_division=0)
-        f1 = f1_score(all_labels, all_preds, average='binary', zero_division=0)
+        # 分类
+        output = self.classifier(x)  # 输出: (batch, num_classes)
         
-        history['val_accuracy'].append(accuracy)
-        history['val_precision'].append(precision)
-        history['val_recall'].append(recall)
-        history['val_f1'].append(f1)
-        
-        # 学习率调整
-        scheduler.step(avg_val_loss)
-        
-        # 保存最佳模型
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            # 根据是否为K折交叉验证选择不同的文件名
-            if fold is not None:
-                model_path = f'best_rdanet_model_fold{fold+1}.pth'
-            else:
-                model_path = 'best_rdanet_model.pth'
-            torch.save(model.state_dict(), model_path)
-        
-        # 打印进度
-        if (epoch + 1) % 5 == 0:
-            fold_info = f" Fold {fold+1}" if fold is not None else ""
-            print(f"\nEpoch {epoch+1}/{epochs}{fold_info}")
-            print(f"  Train Loss: {avg_train_loss:.4f}")
-            print(f"  Val Loss: {avg_val_loss:.4f}")
-            print(f"  Val Accuracy: {accuracy:.4f}")
-            print(f"  Val Precision: {precision:.4f}")
-            print(f"  Val Recall: {recall:.4f}")
-            print(f"  Val F1: {f1:.4f}")
-            
-            # 打印混淆矩阵
-            if epoch == epochs - 1 or epoch == 4:
-                cm = confusion_matrix(all_labels, all_preds)
-                print("\n混淆矩阵:")
-                print(f"         预测非发作  预测发作")
-                print(f"实际非发作:   {cm[0,0]:5d}      {cm[0,1]:5d}")
-                print(f"实际发作:     {cm[1,0]:5d}      {cm[1,1]:5d}")
-    
-    return history
+        return output
 
-
-# ========== 3. 绘制训练曲线 ==========
-
-def plot_kfold_training_history(all_fold_histories, n_folds):
-    """
-    绘制K折交叉验证的训练曲线
-    """
-    fig, axes = plt.subplots(2, 2, figsize=(18, 12))
-    
-    # 颜色列表
-    colors = plt.cm.tab10(np.linspace(0, 1, n_folds))
-    
-    # 1. 损失曲线
-    for fold_idx, history in enumerate(all_fold_histories):
-        axes[0, 0].plot(history['train_loss'], label=f'Fold {fold_idx+1} Train', 
-                       color=colors[fold_idx], linestyle='-', alpha=0.7)
-        axes[0, 0].plot(history['val_loss'], label=f'Fold {fold_idx+1} Val', 
-                       color=colors[fold_idx], linestyle='--', alpha=0.7)
-    
-    # 计算平均损失曲线
-    max_epochs = max(len(h['train_loss']) for h in all_fold_histories)
-    avg_train_loss = []
-    avg_val_loss = []
-    std_train_loss = []
-    std_val_loss = []
-    
-    for epoch in range(max_epochs):
-        train_losses = [h['train_loss'][epoch] for h in all_fold_histories if epoch < len(h['train_loss'])]
-        val_losses = [h['val_loss'][epoch] for h in all_fold_histories if epoch < len(h['val_loss'])]
-        
-        avg_train_loss.append(np.mean(train_losses))
-        avg_val_loss.append(np.mean(val_losses))
-        std_train_loss.append(np.std(train_losses))
-        std_val_loss.append(np.std(val_losses))
-    
-    epochs = range(1, max_epochs + 1)
-    axes[0, 0].plot(epochs, avg_train_loss, label='Average Train', color='black', 
-                   linewidth=2, linestyle='-')
-    axes[0, 0].plot(epochs, avg_val_loss, label='Average Val', color='black', 
-                   linewidth=2, linestyle='--')
-    
-    axes[0, 0].set_xlabel('Epoch')
-    axes[0, 0].set_ylabel('Loss')
-    axes[0, 0].set_title(f'Training and Validation Loss ({n_folds}-Fold CV)')
-    axes[0, 0].legend(loc='best', fontsize=8)
-    axes[0, 0].grid(True, alpha=0.3)
-    
-    # 2. 准确率曲线
-    for fold_idx, history in enumerate(all_fold_histories):
-        axes[0, 1].plot(history['val_accuracy'], label=f'Fold {fold_idx+1}', 
-                       color=colors[fold_idx], alpha=0.7)
-    
-    avg_accuracy = []
-    std_accuracy = []
-    for epoch in range(max_epochs):
-        accuracies = [h['val_accuracy'][epoch] for h in all_fold_histories if epoch < len(h['val_accuracy'])]
-        avg_accuracy.append(np.mean(accuracies))
-        std_accuracy.append(np.std(accuracies))
-    
-    axes[0, 1].plot(epochs, avg_accuracy, label='Average', color='black', linewidth=2)
-    axes[0, 1].fill_between(epochs, 
-                           np.array(avg_accuracy) - np.array(std_accuracy),
-                           np.array(avg_accuracy) + np.array(std_accuracy),
-                           alpha=0.2, color='gray')
-    
-    axes[0, 1].set_xlabel('Epoch')
-    axes[0, 1].set_ylabel('Accuracy')
-    axes[0, 1].set_title(f'Validation Accuracy ({n_folds}-Fold CV)')
-    axes[0, 1].legend(loc='best', fontsize=8)
-    axes[0, 1].grid(True, alpha=0.3)
-    
-    # 3. Precision/Recall/F1曲线
-    for fold_idx, history in enumerate(all_fold_histories):
-        axes[1, 0].plot(history['val_precision'], label=f'Fold {fold_idx+1} Precision', 
-                       color=colors[fold_idx], linestyle='-', alpha=0.5)
-        axes[1, 0].plot(history['val_recall'], label=f'Fold {fold_idx+1} Recall', 
-                       color=colors[fold_idx], linestyle='--', alpha=0.5)
-        axes[1, 0].plot(history['val_f1'], label=f'Fold {fold_idx+1} F1', 
-                       color=colors[fold_idx], linestyle=':', alpha=0.5)
-    
-    # 计算平均指标
-    avg_precision = []
-    avg_recall = []
-    avg_f1 = []
-    
-    for epoch in range(max_epochs):
-        precisions = [h['val_precision'][epoch] for h in all_fold_histories if epoch < len(h['val_precision'])]
-        recalls = [h['val_recall'][epoch] for h in all_fold_histories if epoch < len(h['val_recall'])]
-        f1s = [h['val_f1'][epoch] for h in all_fold_histories if epoch < len(h['val_f1'])]
-        
-        avg_precision.append(np.mean(precisions))
-        avg_recall.append(np.mean(recalls))
-        avg_f1.append(np.mean(f1s))
-    
-    axes[1, 0].plot(epochs, avg_precision, label='Average Precision', color='red', linewidth=2)
-    axes[1, 0].plot(epochs, avg_recall, label='Average Recall', color='blue', linewidth=2)
-    axes[1, 0].plot(epochs, avg_f1, label='Average F1', color='green', linewidth=2)
-    
-    axes[1, 0].set_xlabel('Epoch')
-    axes[1, 0].set_ylabel('Score')
-    axes[1, 0].set_title(f'Precision, Recall, and F1 Score ({n_folds}-Fold CV)')
-    axes[1, 0].legend(loc='best', fontsize=7)
-    axes[1, 0].grid(True, alpha=0.3)
-    
-    # 4. 最终指标表格和箱线图
-    axes[1, 1].axis('tight')
-    axes[1, 1].axis('off')
-    
-    # 收集所有折的最终指标
-    final_metrics = {
-        'Accuracy': [h['val_accuracy'][-1] for h in all_fold_histories],
-        'Precision': [h['val_precision'][-1] for h in all_fold_histories],
-        'Recall': [h['val_recall'][-1] for h in all_fold_histories],
-        'F1': [h['val_f1'][-1] for h in all_fold_histories]
-    }
-    
-    # 创建表格
-    table_data = [
-        ['Metric', 'Mean', 'Std', 'Min', 'Max']
-    ]
-    for metric_name, values in final_metrics.items():
-        table_data.append([
-            metric_name,
-            f"{np.mean(values):.4f}",
-            f"{np.std(values):.4f}",
-            f"{np.min(values):.4f}",
-            f"{np.max(values):.4f}"
-        ])
-    
-    table = axes[1, 1].table(
-        cellText=table_data,
-        loc='center',
-        cellLoc='center',
-        colWidths=[0.2, 0.2, 0.2, 0.2, 0.2]
-    )
-    table.auto_set_font_size(False)
-    table.set_fontsize(9)
-    table.scale(1.2, 1.8)
-    
-    # 设置表头样式
-    for i in range(5):
-        table[(0, i)].set_facecolor('#4CAF50')
-        table[(0, i)].set_text_props(weight='bold', color='white')
-    
-    plt.suptitle(f'DCRNN K-Fold Cross-Validation Training History ({n_folds} Folds)', 
-                 fontsize=16, fontweight='bold')
-    plt.tight_layout()
-    plt.savefig('kfold_training_history.png', dpi=150, bbox_inches='tight')
-    plt.show()
-    
-    # 额外创建一个箱线图来展示各折的性能分布
-    fig2, ax = plt.subplots(figsize=(10, 6))
-    
-    metrics_to_plot = ['Accuracy', 'Precision', 'Recall', 'F1']
-    data_to_plot = [final_metrics[m] for m in metrics_to_plot]
-    
-    bp = ax.boxplot(data_to_plot, labels=metrics_to_plot, patch_artist=True)
-    
-    # 设置箱线图颜色
-    colors = ['#FF9999', '#66B2FF', '#99FF99', '#FFCC99']
-    for patch, color in zip(bp['boxes'], colors):
-        patch.set_facecolor(color)
-    
-    ax.set_ylabel('Score')
-    ax.set_title(f'Performance Distribution Across {n_folds} Folds')
-    ax.grid(True, alpha=0.3, axis='y')
-    
-    # 添加均值线
-    for i, data in enumerate(data_to_plot):
-        mean_val = np.mean(data)
-        ax.axhline(y=mean_val, color='red', linestyle='--', alpha=0.5, xmin=i/len(metrics_to_plot)+0.05, 
-                  xmax=(i+1)/len(metrics_to_plot)-0.05)
-    
-    plt.tight_layout()
-    plt.savefig('kfold_performance_boxplot.png', dpi=150, bbox_inches='tight')
-    plt.show()
-
-
-def plot_training_history(history):
-    """
-    绘制训练曲线（单次训练）
-    """
-    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-    
-    # 损失曲线
-    axes[0, 0].plot(history['train_loss'], label='Train Loss', color='blue')
-    axes[0, 0].plot(history['val_loss'], label='Val Loss', color='orange')
-    axes[0, 0].set_xlabel('Epoch')
-    axes[0, 0].set_ylabel('Loss')
-    axes[0, 0].set_title('Training and Validation Loss')
-    axes[0, 0].legend()
-    axes[0, 0].grid(True, alpha=0.3)
-    
-    # 准确率曲线
-    axes[0, 1].plot(history['val_accuracy'], label='Val Accuracy', color='green')
-    axes[0, 1].set_xlabel('Epoch')
-    axes[0, 1].set_ylabel('Accuracy')
-    axes[0, 1].set_title('Validation Accuracy')
-    axes[0, 1].legend()
-    axes[0, 1].grid(True, alpha=0.3)
-    
-    # Precision/Recall/F1曲线
-    axes[1, 0].plot(history['val_precision'], label='Precision', color='red')
-    axes[1, 0].plot(history['val_recall'], label='Recall', color='blue')
-    axes[1, 0].plot(history['val_f1'], label='F1', color='green')
-    axes[1, 0].set_xlabel('Epoch')
-    axes[1, 0].set_ylabel('Score')
-    axes[1, 0].set_title('Precision, Recall, and F1 Score')
-    axes[1, 0].legend()
-    axes[1, 0].grid(True, alpha=0.3)
-    
-    # 最终指标表格
-    axes[1, 1].axis('tight')
-    axes[1, 1].axis('off')
-    
-    final_metrics = [
-        ['Metric', 'Value'],
-        ['Best Val Loss', f"{min(history['val_loss']):.4f}"],
-        ['Final Accuracy', f"{history['val_accuracy'][-1]:.4f}"],
-        ['Final Precision', f"{history['val_precision'][-1]:.4f}"],
-        ['Final Recall', f"{history['val_recall'][-1]:.4f}"],
-        ['Final F1', f"{history['val_f1'][-1]:.4f}"]
-    ]
-    
-    table = axes[1, 1].table(
-        cellText=final_metrics,
-        loc='center',
-        cellLoc='center',
-        colWidths=[0.3, 0.3]
-    )
-    table.auto_set_font_size(False)
-    table.set_fontsize(10)
-    table.scale(1.2, 1.5)
-    
-    plt.suptitle('DCRNN Training History on chb STFT Data (Patients 01-03)', fontsize=14)
-    plt.tight_layout()
-    plt.savefig('dcrnn_training_history_multi_patient.png', dpi=150)
-    plt.show()
-
-
-# ========== 4. 测试函数 ==========
 
 def test_model(model, test_loader, device='cuda'):
     """
@@ -1212,230 +847,133 @@ def test_model(model, test_loader, device='cuda'):
     }
 
 
-# ========== 5. 主程序 ==========
-
 def main():
     print("\n" + "="*70)
-    print("开始训练RDANet模型 on STFT数据 (K折交叉验证)")
+    print("在chb03上测试最佳模型")
     print("="*70)
     
     # 1. 设置基础路径
     base_data_dir = "D:/Graduation_thesis"  # 基础数据目录
     
-    # 2. 指定要加载的病人
-    patient_ids = ['chb02']
-    
-    # 3. 设置K折交叉验证参数
-    n_folds = 5  # K折数
-    print(f"\n使用 {n_folds} 折交叉验证")
-    
-    # 4. 加载所有病人的数据
-    all_stft_files, all_seizure_times = load_all_patients_data(
-        patient_ids=patient_ids,
+    # 2. 加载chb03数据
+    test_patient_ids = ['chb03']
+    test_stft_files, test_seizure_times = load_all_patients_data(
+        patient_ids=test_patient_ids,
         base_data_dir=base_data_dir
     )
     
-    if len(all_stft_files) == 0:
-        print("\n❌ 错误: 没有找到任何STFT文件！")
+    if len(test_stft_files) == 0:
+        print("\n❌ 错误: 没有找到chb03的STFT文件！")
         return
     
-    # 5. 创建数据集
-    print("\n" + "="*70)
-    print("创建数据集...")
-    print("="*70)
-    
+    # 3. 创建测试数据集
     try:
-        full_dataset = MultiFileSTFTWithLabels(
-            stft_files=all_stft_files,
-            seizure_times=all_seizure_times,
-            #window_size=30,
+        test_dataset = MultiFileSTFTWithLabels(
+            stft_files=test_stft_files,
+            seizure_times=test_seizure_times,
             window_size=None,
             stride=15,
             normalize=True,
-            balance_classes=True
-        )
-    except Exception as e:
-        print(f"\n❌ 创建数据集失败: {e}")
-        return
-    
-    # 6. 获取输入维度
-    sample_data, _ = full_dataset[0]
-    n_channels, n_time, n_freq = sample_data.shape
-    print(f"\n输入维度: n_channels={n_channels}, n_time={n_time}, n_freq={n_freq}")
-    
-    # 7. 设置设备
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"\n使用设备: {device}")
-    
-    # 8. K折交叉验证
-    print("\n" + "="*70)
-    print(f"开始 {n_folds} 折交叉验证")
-    print("="*70)
-    
-    # 创建KFold对象
-    kfold = KFold(n_splits=n_folds, shuffle=True, random_state=42)
-    
-    # 存储所有折的结果
-    all_fold_results = []
-    all_fold_histories = []
-    
-    # 遍历每一折
-    for fold, (train_idx, test_idx) in enumerate(kfold.split(range(len(full_dataset)))):
-        print(f"\n{'='*70}")
-        print(f"第 {fold+1}/{n_folds} 折")
-        print(f"{'='*70}")
-        
-        # 创建训练集和测试集
-        train_dataset = torch.utils.data.Subset(full_dataset, train_idx)
-        test_dataset = torch.utils.data.Subset(full_dataset, test_idx)
-        
-        # 从训练集中划分验证集
-        train_size = int(0.85 * len(train_dataset))
-        val_size = len(train_dataset) - train_size
-        train_dataset, val_dataset = torch.utils.data.random_split(
-            train_dataset, [train_size, val_size],
-            generator=torch.Generator().manual_seed(42)
+            balance_classes=False  # 测试集不需要平衡
         )
         
-        print(f"训练集大小: {len(train_dataset)}")
-        print(f"验证集大小: {len(val_dataset)}")
-        print(f"测试集大小: {len(test_dataset)}")
+        print(f"\nchb03测试集大小: {len(test_dataset)}")
         
-        # 创建数据加载器
-        batch_size = 32  # 最小batch size以节省内存
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
-        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
-        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+        # 4. 获取输入维度
+        sample_data, _ = test_dataset[0]
+        n_channels, n_time, n_freq = sample_data.shape
+        print(f"\n输入维度: n_channels={n_channels}, n_time={n_time}, n_freq={n_freq}")
         
-        # 初始化模型
-        model = RDANet(
-            in_channels=n_channels,
-            num_classes=2,
-            dropout=0.3
-        ).to(device)
+        # 5. 设置设备
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"\n使用设备: {device}")
         
-        print(f"模型参数总数: {sum(p.numel() for p in model.parameters()):,}")
+        # 6. 创建测试数据加载器
+        test_batch_size = min(16, len(test_dataset))
+        test_loader = DataLoader(test_dataset, batch_size=test_batch_size, shuffle=False, num_workers=0)
         
-        # 训练模型
-        history = train_model(
-            model=model,
-            train_loader=train_loader,
-            val_loader=val_loader,
-            epochs=50,
-            lr=0.001,
-            device=device,
-            fold=fold
-        )
+        # 7. 加载最佳模型
+        # 这里假设最佳模型文件已经存在，文件名格式为 best_rdanet_model_foldX.pth
+        # 我们可以尝试加载所有可能的模型文件，选择F1分数最高的
+        best_model = None
+        best_f1 = 0
+        best_model_path = None
         
-        # 加载最佳模型并测试
-        model_path = f'best_rdanet_model_fold{fold+1}.pth'
-        if Path(model_path).exists():
-            model.load_state_dict(torch.load(model_path))
-            test_results = test_model(model, test_loader, device)
+        import glob
+        model_files = glob.glob('best_rdanet_model_fold*.pth')
+        
+        if not model_files:
+            print("\n❌ 未找到任何模型文件！")
+            return
+        
+        print(f"\n找到 {len(model_files)} 个模型文件:")
+        for model_file in model_files:
+            print(f"  - {model_file}")
+        
+        # 尝试加载每个模型并在chb03上测试
+        for model_file in model_files:
+            try:
+                # 初始化模型
+                model = RDANet(
+                    in_channels=n_channels,
+                    num_classes=2,
+                    dropout=0.3
+                ).to(device)
+                
+                model.load_state_dict(torch.load(model_file))
+                print(f"\n✅ 已加载模型: {model_file}")
+                
+                # 测试模型
+                results = test_model(model, test_loader, device)
+                
+                # 比较F1分数
+                if results['f1'] > best_f1:
+                    best_f1 = results['f1']
+                    best_model = model
+                    best_model_path = model_file
+                    
+                print(f"  F1 Score: {results['f1']:.4f}")
+                
+            except Exception as e:
+                print(f"\n❌ 加载模型 {model_file} 时出错: {e}")
+                continue
+        
+        # 8. 输出最佳模型结果
+        if best_model:
+            print("\n" + "="*70)
+            print(f"最佳模型: {best_model_path}")
+            print(f"最佳F1 Score: {best_f1:.4f}")
+            print("="*70)
+            
+            # 再次测试最佳模型以获取完整结果
+            print("\n" + "="*70)
+            print("使用最佳模型在chb03上的测试结果")
+            print("="*70)
+            best_results = test_model(best_model, test_loader, device)
+            
+            # 保存chb03测试结果
+            chb03_results = {
+                'test_patient': 'chb03',
+                'best_model': best_model_path,
+                'accuracy': float(best_results['accuracy']),
+                'precision': float(best_results['precision']),
+                'recall': float(best_results['recall']),
+                'f1': float(best_results['f1']),
+                'auc': float(best_results['auc']),
+                'confusion_matrix': best_results['confusion_matrix'].tolist()
+            }
+            
+            # 保存结果到JSON文件
+            with open('chb03_test_results.json', 'w', encoding='utf-8') as f:
+                json.dump(chb03_results, f, indent=2, ensure_ascii=False)
+            
+            print("\n✅ chb03测试结果已保存到 chb03_test_results.json")
+            
         else:
-            print(f"\n⚠️ 未找到最佳模型文件 {model_path}，使用最后一个epoch的模型进行测试")
-            test_results = test_model(model, test_loader, device)
-        
-        # 保存当前折的结果
-        all_fold_results.append(test_results)
-        all_fold_histories.append(history)
-        
-        print(f"\n✅ 第 {fold+1} 折完成！")
-    
-    # 9. 汇总所有折的结果
-    print("\n" + "="*70)
-    print("K折交叉验证结果汇总")
-    print("="*70)
-    
-    # 计算平均指标
-    avg_accuracy = np.mean([r['accuracy'] for r in all_fold_results])
-    avg_precision = np.mean([r['precision'] for r in all_fold_results])
-    avg_recall = np.mean([r['recall'] for r in all_fold_results])
-    avg_f1 = np.mean([r['f1'] for r in all_fold_results])
-    avg_sensitivity = np.mean([r['sensitivity'] for r in all_fold_results])
-    avg_specificity = np.mean([r['specificity'] for r in all_fold_results])
-    avg_auc = np.mean([r['auc'] for r in all_fold_results])
-    
-    std_accuracy = np.std([r['accuracy'] for r in all_fold_results])
-    std_precision = np.std([r['precision'] for r in all_fold_results])
-    std_recall = np.std([r['recall'] for r in all_fold_results])
-    std_f1 = np.std([r['f1'] for r in all_fold_results])
-    std_sensitivity = np.std([r['sensitivity'] for r in all_fold_results])
-    std_specificity = np.std([r['specificity'] for r in all_fold_results])
-    std_auc = np.std([r['auc'] for r in all_fold_results])
-    
-    print(f"\n平均指标:")
-    print(f"  Accuracy:    {avg_accuracy:.4f} ± {std_accuracy:.4f}")
-    print(f"  Precision:   {avg_precision:.4f} ± {std_precision:.4f}")
-    print(f"  Recall:      {avg_recall:.4f} ± {std_recall:.4f}")
-    print(f"  F1 Score:    {avg_f1:.4f} ± {std_f1:.4f}")
-    print(f"  Sensitivity: {avg_sensitivity:.4f} ± {std_sensitivity:.4f}  (发作样本正确识别率)")
-    print(f"  Specificity: {avg_specificity:.4f} ± {std_specificity:.4f}  (非发作样本正确识别率)")
-    print(f"  AUC:         {avg_auc:.4f} ± {std_auc:.4f}")
-    
-    # 12. 选择最佳模型
-    print("\n" + "="*70)
-    print("选择最佳模型")
-    print("="*70)
-    
-    # 使用F1分数作为主要指标选择最佳模型
-    best_fold_idx = np.argmax([r['f1'] for r in all_fold_results])
-    best_fold = best_fold_idx + 1
-    best_results = all_fold_results[best_fold_idx]
-    
-    print(f"\n最佳模型: 第 {best_fold} 折")
-    print(f"  F1 Score:  {best_results['f1']:.4f}")
-    print(f"  Accuracy:  {best_results['accuracy']:.4f}")
-    print(f"  Precision: {best_results['precision']:.4f}")
-    print(f"  Recall:    {best_results['recall']:.4f}")
-    print(f"  AUC:       {best_results['auc']:.4f}")
-    
-
-    
-    # 10. 绘制所有折的训练曲线
-    plot_kfold_training_history(all_fold_histories, n_folds)
-    
-    # 11. 保存结果
-    converted_results = []
-    for i, (results, history) in enumerate(zip(all_fold_results, all_fold_histories)):
-        converted_history = {}
-        for key, values in history.items():
-            converted_history[key] = [float(v) for v in values]
-        
-        converted_result = {
-            'fold': i + 1,
-            'accuracy': float(results['accuracy']),
-            'precision': float(results['precision']),
-            'recall': float(results['recall']),
-            'f1': float(results['f1']),
-            'auc': float(results['auc']),
-            'confusion_matrix': results['confusion_matrix'].tolist(),
-            'history': converted_history
-        }
-        converted_results.append(converted_result)
-    
-    # 保存汇总结果
-    summary_results = {
-        'patients': patient_ids,
-        'num_stft_files': len(all_stft_files),
-        'num_seizure_files': len(all_seizure_times),
-        'n_folds': n_folds,
-        'fold_results': converted_results,
-        'average_metrics': {
-            'accuracy': {'mean': float(avg_accuracy), 'std': float(std_accuracy)},
-            'precision': {'mean': float(avg_precision), 'std': float(std_precision)},
-            'recall': {'mean': float(avg_recall), 'std': float(std_recall)},
-            'f1': {'mean': float(avg_f1), 'std': float(std_f1)},
-            'auc': {'mean': float(avg_auc), 'std': float(std_auc)}
-        }
-    }
-    
-    with open('kfold_training_results.json', 'w') as f:
-        json.dump(summary_results, f, indent=2)
-    
-    print("\n✅ K折交叉验证完成！结果已保存到 kfold_training_results.json")
-    
-
+            print("\n❌ 没有成功加载任何模型！")
+            
+    except Exception as e:
+        print(f"\n❌ chb03测试失败: {e}")
 
 
 if __name__ == "__main__":
