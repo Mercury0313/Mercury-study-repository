@@ -7,8 +7,46 @@ from torch.utils.data import Dataset, DataLoader, ConcatDataset
 import numpy as np
 from pathlib import Path
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
+import torch.nn.functional as F
 import warnings
 warnings.filterwarnings('ignore')
+
+
+class LocalSTFTDataset(Dataset):
+    """
+    从本地加载STFT训练样本的数据集
+    """
+    def __init__(self, samples, labels):
+        self.samples = samples
+        self.labels = labels
+    
+    def __len__(self):
+        return len(self.samples)
+    
+    def __getitem__(self, idx):
+        data = torch.FloatTensor(self.samples[idx])
+        label = torch.FloatTensor(self.labels[idx])
+        return data, label
+
+
+def load_training_samples(save_path):
+    """
+    加载训练样本
+    """
+    print(f"\n加载训练样本: {save_path}")
+    
+    with np.load(save_path, allow_pickle=True) as data:
+        samples = data['data']
+        labels = data['labels']
+        metadata = data['metadata'] if 'metadata' in data else []
+        global_mean = data['global_mean'] if 'global_mean' in data else None
+        global_std = data['global_std'] if 'global_std' in data else None
+    
+    print(f"  加载成功: {len(samples)} 个样本")
+    print(f"  数据形状: {samples.shape}")
+    print(f"  标签形状: {labels.shape}")
+    
+    return samples, labels, metadata, global_mean, global_std
 
 
 class MultiFileSTFTDataset(Dataset):
@@ -713,71 +751,259 @@ class SpatialAttention(nn.Module):
 
 class RDANet(nn.Module):
     """
-    RDANet模型，用于脑电信号频谱图分类 - 输入为(batch, 22, n_time, n_freq)
+    RDANet模型 - 基于高光谱图像分类架构
+    输入格式: (batch, channels, height, width, spectral)
+    原始架构: 输入 (1, 22, 9, 114)
+    
+    对于脑电信号频谱图，需要调整输入格式：
+    如果输入是 (batch, 22, n_time, n_freq)，则视为 (batch, 1, 22, n_time, n_freq)
+    即把22个通道视为空间高度，n_time视为宽度，n_freq视为光谱维度
     """
-    def __init__(self, in_channels=22, num_classes=2, dropout=0.3):
+    def __init__(self, in_channels=1, num_classes=2, dropout=0.3, 
+                 spectral_bands=114, spatial_height=22, spatial_width=9):
+        """
+        Args:
+            in_channels: 输入通道数（对于高光谱，通常为1）
+            num_classes: 分类类别数
+            dropout: dropout率
+            spectral_bands: 光谱波段数
+            spatial_height: 空间高度
+            spatial_width: 空间宽度
+        """
         super().__init__()
         
-        # 初始卷积层 - 输入通道数为in_channels (22)
-        self.initial_conv = nn.Sequential(
-            nn.Conv2d(in_channels, 32, kernel_size=(3, 3), padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(),
-            nn.Dropout(dropout)
-        )
+        self.spectral_bands = spectral_bands
+        self.spatial_height = spatial_height
+        self.spatial_width = spatial_width
         
-        # 调整卷积
-        self.adjust_conv = nn.Sequential(
-            nn.Conv2d(32, 32, kernel_size=(3, 3), padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(),
-            nn.Dropout(dropout)
-        )
+        # ========== 第一阶段：3D卷积 + 3D池化 ==========
+        # Conv3D: 输入 (batch, in_channels, H, W, D)
+        # 输出通道数: 64
+        self.conv3d = nn.Conv3d(in_channels, 64, kernel_size=(spatial_height, 3, 5), 
+                                 stride=(1, 1, 2), padding=0, bias=False)
+        self.bn3d = nn.BatchNorm3d(64)
+        self.relu3d = nn.ReLU(inplace=True)
         
-        # 两个残差块
-        self.residual_blocks = nn.Sequential(
-            ResidualBlock(32, 32, dropout),
-            ResidualBlock(32, 32, dropout)
-        )
+        # 3D池化: 只在光谱维度池化
+        self.pool3d = nn.MaxPool3d(kernel_size=(1, 1, 2), stride=(1, 1, 2), ceil_mode=True)
         
-        # 注意力模块
-        self.channel_attention = ChannelAttention(32)
-        self.spatial_attention = SpatialAttention()
+        # ========== 第二阶段：ResNet 残差块（2D卷积） ==========
+        # 注意：经过3D卷积和池化后，输出为 (batch, 64, 1, 7, 28)
+        # Reshape后为 (batch, 64, 7, 28)
         
-        # 全局平均池化和分类器
+        # ResNet Block1: 64通道，空间尺寸 7x28，重复2次
+        self.block1 = self._make_layer(64, 64, 2, stride=1, dropout=dropout)
+        
+        # ResNet Block2: 128通道，空间尺寸 4x14，重复2次
+        self.block2 = self._make_layer(64, 128, 2, stride=2, dropout=dropout)
+        
+        # ResNet Block3: 256通道，空间尺寸 2x7，重复2次
+        self.block3 = self._make_layer(128, 256, 2, stride=2, dropout=dropout)
+        
+        # ResNet Block4: 512通道，空间尺寸 1x4，重复2次
+        self.block4 = self._make_layer(256, 512, 2, stride=2, dropout=dropout)
+        
+        # ========== 第三阶段：双自注意力 ==========
+        self.dual_attention = DualSelfAttention(512)
+        
+        # ========== 第四阶段：分类头 ==========
+        # 全局平均池化
         self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
+        
+        # 分类器
         self.classifier = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(32, 64),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(64, num_classes)
+            nn.Linear(512, num_classes)
         )
+        
+        # 初始化权重
+        self._initialize_weights()
+    
+    def _make_layer(self, in_channels, out_channels, num_blocks, stride, dropout):
+        """创建残差块组"""
+        layers = []
+        
+        # 第一个残差块（可能改变通道数和尺寸）
+        layers.append(BasicBlock(in_channels, out_channels, stride, dropout))
+        
+        # 后续残差块（保持通道数和尺寸）
+        for _ in range(1, num_blocks):
+            layers.append(BasicBlock(out_channels, out_channels, 1, dropout))
+        
+        return nn.Sequential(*layers)
+    
+    def _initialize_weights(self):
+        """权重初始化"""
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d) or isinstance(m, nn.Conv3d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.BatchNorm2d) or isinstance(m, nn.BatchNorm3d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, 0, 0.01)
+                nn.init.constant_(m.bias, 0)
     
     def forward(self, x):
-        # 输入形状: (batch, n_channels, n_time, n_freq) = (batch, 22, 59, ~120)
+        """
+        Args:
+            x: 输入张量
+               选项1: (batch, 1, H, W, D) 标准5D高光谱输入
+               选项2: (batch, 22, n_time, n_freq) 脑电频谱图，需reshape为 (batch, 1, 22, n_time, n_freq)
+        Returns:
+            output: (batch, num_classes)
+        """
+        # 处理输入维度
+        if x.dim() == 4:
+            # 输入是 (batch, channels, height, width) 格式
+            # 假设 channels=22 是空间高度，height是时间，width是频率
+            batch, channels, height, width = x.shape
+            # 重塑为 (batch, 1, spatial_height, spatial_width, spectral_bands)
+            # 这里假设 channels=22 是空间高度，height是宽度，width是光谱维度
+            x = x.unsqueeze(1)  # (batch, 1, 22, height, width)
         
-        # 初始卷积 - 直接处理4D输入
-        x = self.initial_conv(x)  # 输出: (batch, 32, n_time, n_freq)
+        # 输入形状: (batch, 1, H, W, D)
+        # H = 22 (空间高度)
+        # W = n_time (时间/宽度)
+        # D = n_freq (频率/光谱)
         
-        # 调整卷积
-        x = self.adjust_conv(x)  # 输出: (batch, 32, n_time, n_freq)
+        # ========== 3D卷积 ==========
+        x = self.conv3d(x)  # (batch, 64, 1, W_out, D_out)
+        x = self.bn3d(x)
+        x = self.relu3d(x)
         
-        # 残差块
-        x = self.residual_blocks(x)  # 输出: (batch, 32, n_time, n_freq)
+        # ========== 3D池化 ==========
+        x = self.pool3d(x)  # (batch, 64, 1, W_pool, D_pool)
         
-        # 通道注意力与空间注意力的组合
-        x1 = self.channel_attention(x)
-        x2 = self.spatial_attention(x)
-        x = x1 + x2
+        # ========== Reshape: 移除高度维度 ==========
+        # 输入: (batch, 64, 1, H, W) -> (batch, 64, H, W)
+        x = x.squeeze(2)  # (batch, 64, H, W)
         
-        # 全局平均池化
-        x = self.global_avg_pool(x)  # 输出: (batch, 32, 1, 1)
+        # ========== ResNet 残差块 ==========
+        x = self.block1(x)  # (batch, 64, H1, W1)
+        x = self.block2(x)  # (batch, 128, H2, W2)
+        x = self.block3(x)  # (batch, 256, H3, W3)
+        x = self.block4(x)  # (batch, 512, H4, W4)
         
-        # 分类
-        output = self.classifier(x)  # 输出: (batch, num_classes)
+        # ========== 双自注意力 ==========
+        x = self.dual_attention(x)  # (batch, 512, H4, W4)
         
-        return output
+        # ========== 分类 ==========
+        x = self.global_avg_pool(x)  # (batch, 512, 1, 1)
+        x = self.classifier(x)  # (batch, num_classes)
+        
+        return x
+
+
+class DualSelfAttention(nn.Module):
+    """
+    双自注意力模块：位置自注意力 + 通道自注意力
+    输入: (batch, C, H, W)
+    输出: (batch, C, H, W)
+    """
+    def __init__(self, in_channels):
+        super().__init__()
+        self.in_channels = in_channels
+        
+        # 位置注意力
+        self.position_query = nn.Conv2d(in_channels, in_channels // 8, kernel_size=1)
+        self.position_key = nn.Conv2d(in_channels, in_channels // 8, kernel_size=1)
+        self.position_value = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+        
+        # 通道注意力
+        self.channel_query = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+        self.channel_key = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+        self.channel_value = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+        
+        # 输出投影
+        self.position_gamma = nn.Parameter(torch.zeros(1))
+        self.channel_gamma = nn.Parameter(torch.zeros(1))
+        
+    def forward(self, x):
+        batch, C, H, W = x.shape
+        N = H * W  # 空间位置数
+        
+        # ========== 位置自注意力 ==========
+        # 生成 Q, K, V
+        pos_q = self.position_query(x).view(batch, -1, N).permute(0, 2, 1)  # (B, N, C/8)
+        pos_k = self.position_key(x).view(batch, -1, N)  # (B, C/8, N)
+        pos_v = self.position_value(x).view(batch, -1, N)  # (B, C, N)
+        
+        # 计算注意力图
+        pos_attn = torch.bmm(pos_q, pos_k)  # (B, N, N)
+        pos_attn = F.softmax(pos_attn, dim=-1)
+        
+        # 加权求和
+        pos_out = torch.bmm(pos_v, pos_attn.permute(0, 2, 1))  # (B, C, N)
+        pos_out = pos_out.view(batch, C, H, W)
+        pos_out = self.position_gamma * pos_out + x  # 残差连接
+        
+        # ========== 通道自注意力 ==========
+        # 生成 Q, K, V
+        chan_q = self.channel_query(pos_out).view(batch, C, -1)  # (B, C, N)
+        chan_k = self.channel_key(pos_out).view(batch, C, -1)  # (B, C, N)
+        chan_v = self.channel_value(pos_out).view(batch, C, -1)  # (B, C, N)
+        
+        # 计算注意力图
+        chan_attn = torch.bmm(chan_q, chan_k.permute(0, 2, 1))  # (B, C, C)
+        chan_attn = F.softmax(chan_attn, dim=-1)
+        
+        # 加权求和
+        chan_out = torch.bmm(chan_attn, chan_v)  # (B, C, N)
+        chan_out = chan_out.view(batch, C, H, W)
+        chan_out = self.channel_gamma * chan_out + pos_out  # 残差连接
+        
+        return chan_out
+
+
+class BasicBlock(nn.Module):
+    """
+    基本残差块（2个3x3卷积）
+    当通道数变化或步长变化时，shortcut使用1x1卷积
+    """
+    def __init__(self, in_channels, out_channels, stride=1, dropout=0.0):
+        super().__init__()
+        
+        # 第一个卷积层（可能下采样）
+        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, 
+                                stride=stride, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(out_channels)
+        
+        # 第二个卷积层
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3,
+                                stride=1, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(out_channels)
+        
+        self.relu = nn.ReLU(inplace=True)
+        self.dropout = nn.Dropout2d(dropout) if dropout > 0 else nn.Identity()
+        
+        # shortcut连接
+        if stride != 1 or in_channels != out_channels:
+            self.shortcut = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, kernel_size=1,
+                         stride=stride, bias=False),
+                nn.BatchNorm2d(out_channels)
+            )
+        else:
+            self.shortcut = nn.Identity()
+    
+    def forward(self, x):
+        residual = self.shortcut(x)
+        
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.dropout(x)
+        
+        x = self.conv2(x)
+        x = self.bn2(x)
+        
+        x += residual
+        x = self.relu(x)
+        
+        return x
 
 
 def test_model(model, test_loader, device='cuda'):
@@ -849,38 +1075,30 @@ def test_model(model, test_loader, device='cuda'):
 
 def main():
     print("\n" + "="*70)
-    print("在chb03上测试最佳模型")
+    print("使用预处理好的样本验证模型效果")
     print("="*70)
     
-    # 1. 设置基础路径
-    base_data_dir = "D:/Graduation_thesis"  # 基础数据目录
-    
-    # 2. 加载chb03数据
-    test_patient_ids = ['chb03']
-    test_stft_files, test_seizure_times = load_all_patients_data(
-        patient_ids=test_patient_ids,
-        base_data_dir=base_data_dir
-    )
-    
-    if len(test_stft_files) == 0:
-        print("\n❌ 错误: 没有找到chb03的STFT文件！")
-        return
-    
-    # 3. 创建测试数据集
     try:
-        test_dataset = MultiFileSTFTWithLabels(
-            stft_files=test_stft_files,
-            seizure_times=test_seizure_times,
-            window_size=None,
-            stride=15,
-            normalize=True,
-            balance_classes=False  # 测试集不需要平衡
-        )
+        # 1. 设置基础路径
+        base_data_dir = "D:/Graduation_thesis"  # 基础数据目录
         
-        print(f"\nchb03测试集大小: {len(test_dataset)}")
+        # 2. 加载预处理好的训练样本
+        training_samples_path = base_data_dir + "/training_samples_2_6_7.npz"
+        samples, labels, metadata, global_mean, global_std = load_training_samples(training_samples_path)
+        
+        # 3. 创建数据集
+        print("\n" + "="*70)
+        print("创建数据集...")
+        print("="*70)
+        
+        try:
+            full_dataset = LocalSTFTDataset(samples, labels)
+        except Exception as e:
+            print(f"\n[ERROR] 创建数据集失败: {e}")
+            return
         
         # 4. 获取输入维度
-        sample_data, _ = test_dataset[0]
+        sample_data, _ = full_dataset[0]
         n_channels, n_time, n_freq = sample_data.shape
         print(f"\n输入维度: n_channels={n_channels}, n_time={n_time}, n_freq={n_freq}")
         
@@ -889,39 +1107,44 @@ def main():
         print(f"\n使用设备: {device}")
         
         # 6. 创建测试数据加载器
-        test_batch_size = min(16, len(test_dataset))
-        test_loader = DataLoader(test_dataset, batch_size=test_batch_size, shuffle=False, num_workers=0)
+        batch_size = 32  # 最小batch size以节省内存
+        test_loader = DataLoader(full_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
         
         # 7. 加载最佳模型
-        # 这里假设最佳模型文件已经存在，文件名格式为 best_rdanet_model_foldX.pth
+        # 这里假设最佳模型文件已经存在，文件名格式为 best_dual_model_foldX.pth
         # 我们可以尝试加载所有可能的模型文件，选择F1分数最高的
         best_model = None
         best_f1 = 0
         best_model_path = None
         
         import glob
-        model_files = glob.glob('best_rdanet_model_fold*.pth')
+        model_files = glob.glob('best_dual_model_fold*.pth')
+        # path=Path("D:/Graduation_thesis/code/")
+        # model_files=path.glob("best_dual_model_fold*.pth")
         
         if not model_files:
-            print("\n❌ 未找到任何模型文件！")
+            print("\n[ERROR] 未找到任何模型文件！")
             return
         
         print(f"\n找到 {len(model_files)} 个模型文件:")
         for model_file in model_files:
             print(f"  - {model_file}")
         
-        # 尝试加载每个模型并在chb03上测试
+        # 尝试加载每个模型并测试
         for model_file in model_files:
             try:
                 # 初始化模型
                 model = RDANet(
-                    in_channels=n_channels,
-                    num_classes=2,
-                    dropout=0.3
+                    in_channels=1,           
+                    num_classes=2,          
+                    dropout=0.3,            
+                    spectral_bands=n_freq,     
+                    spatial_height=n_channels,      
+                    spatial_width=n_time         
                 ).to(device)
                 
                 model.load_state_dict(torch.load(model_file))
-                print(f"\n✅ 已加载模型: {model_file}")
+                print(f"\n[SUCCESS] 已加载模型: {model_file}")
                 
                 # 测试模型
                 results = test_model(model, test_loader, device)
@@ -935,7 +1158,7 @@ def main():
                 print(f"  F1 Score: {results['f1']:.4f}")
                 
             except Exception as e:
-                print(f"\n❌ 加载模型 {model_file} 时出错: {e}")
+                print(f"\n[ERROR] 加载模型 {model_file} 时出错: {e}")
                 continue
         
         # 8. 输出最佳模型结果
@@ -947,13 +1170,13 @@ def main():
             
             # 再次测试最佳模型以获取完整结果
             print("\n" + "="*70)
-            print("使用最佳模型在chb03上的测试结果")
+            print("使用最佳模型的测试结果")
             print("="*70)
             best_results = test_model(best_model, test_loader, device)
             
-            # 保存chb03测试结果
-            chb03_results = {
-                'test_patient': 'chb03',
+            # 保存测试结果
+            test_results = {
+                'test_data': 'training_samples_2_6_7.npz',
                 'best_model': best_model_path,
                 'accuracy': float(best_results['accuracy']),
                 'precision': float(best_results['precision']),
@@ -964,16 +1187,16 @@ def main():
             }
             
             # 保存结果到JSON文件
-            with open('chb03_test_results.json', 'w', encoding='utf-8') as f:
-                json.dump(chb03_results, f, indent=2, ensure_ascii=False)
+            with open('validation_results.json', 'w', encoding='utf-8') as f:
+                json.dump(test_results, f, indent=2, ensure_ascii=False)
             
-            print("\n✅ chb03测试结果已保存到 chb03_test_results.json")
+            print("\n[SUCCESS] 验证结果已保存到 validation_results.json")
             
         else:
-            print("\n❌ 没有成功加载任何模型！")
+            print("\n[ERROR] 没有成功加载任何模型！")
             
     except Exception as e:
-        print(f"\n❌ chb03测试失败: {e}")
+        print(f"\n[ERROR] 验证失败: {e}")
 
 
 if __name__ == "__main__":

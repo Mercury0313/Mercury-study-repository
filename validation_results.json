@@ -1,0 +1,19 @@
+{
+  "test_data": "training_samples_2_6_7.npz",
+  "best_model": "best_dual_model_fold2.pth",
+  "accuracy": 0.47832207207207206,
+  "precision": 0.48109965635738833,
+  "recall": 0.5518018018018018,
+  "f1": 0.5140309467610805,
+  "auc": 0.47377143824567813,
+  "confusion_matrix": [
+    [
+      719,
+      1057
+    ],
+    [
+      796,
+      980
+    ]
+  ]
+}
