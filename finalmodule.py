@@ -769,7 +769,7 @@ def main():
     print(f"\n使用 {n_folds} 折交叉验证")
     
     # 3. 加载训练样本
-    training_samples_path = base_data_dir + "/training_samples_3_5.npz"
+    training_samples_path = base_data_dir + "/training_samples_30s.npz"
     samples, labels, metadata, global_mean, global_std = load_training_samples(training_samples_path)
     
     # 4. 创建数据集
