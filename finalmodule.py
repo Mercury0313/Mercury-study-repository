@@ -1,3 +1,4 @@
+#分别加载数据集
 import json
 import re
 import torch
@@ -326,9 +327,18 @@ def load_training_samples(save_path):
 
 # ========== 2. 训练函数 ==========
 
-def train_model(model, train_loader, val_loader, epochs=50, lr=0.001, device='cuda', fold=None):
+def train_model(model, train_loader, val_loader, epochs=50, lr=0.001, device='cuda', fold=None, patience=10):
     """
     训练模型
+    Args:
+        model: 模型
+        train_loader: 训练数据加载器
+        val_loader: 验证数据加载器
+        epochs: 最大训练轮数
+        lr: 学习率
+        device: 设备
+        fold: 折数（用于K折交叉验证）
+        patience: Early stopping的耐心值，验证损失连续patience个epoch不改善则停止
     """
     # 损失函数和优化器
     class_weights = torch.FloatTensor([1.0, 2.0]).to(device)  # 给发作类更高权重
@@ -348,7 +358,11 @@ def train_model(model, train_loader, val_loader, epochs=50, lr=0.001, device='cu
         'val_f1': []
     }
     
+    # Early stopping相关变量
     best_val_loss = float('inf')
+    best_model_state = None
+    epochs_no_improve = 0
+    early_stop = False
     
     for epoch in range(epochs):
         # 训练
@@ -414,19 +428,29 @@ def train_model(model, train_loader, val_loader, epochs=50, lr=0.001, device='cu
         # 学习率调整
         scheduler.step(avg_val_loss)
         
-        # 保存最佳模型
+        # Early stopping检查
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
-            # 根据是否为K折交叉验证选择不同的文件名
+            best_model_state = model.state_dict().copy()
+            epochs_no_improve = 0
+            
+            # 保存最佳模型到文件
             if fold is not None:
-                model_path = f'best_dual_model_fold{fold+1}.pth'
+                model_path = f'best_dual_model_fold{fold}.pth'
             else:
                 model_path = 'best_dual_model.pth'
             torch.save(model.state_dict(), model_path)
+        else:
+            epochs_no_improve += 1
+            if epochs_no_improve >= patience:
+                early_stop = True
+                print(f"\nEarly stopping triggered! 验证损失连续{patience}个epoch未改善。")
+                print(f"最佳验证损失: {best_val_loss:.4f} 在 epoch {epoch - patience + 1}")
+                break
         
         # 打印进度
-        if (epoch + 1) % 5 == 0:
-            fold_info = f" Fold {fold+1}" if fold is not None else ""
+        if (epoch + 1) % 5 == 0 or early_stop:
+            fold_info = f" Fold {fold}" if fold is not None else ""
             print(f"\nEpoch {epoch+1}/{epochs}{fold_info}")
             print(f"  Train Loss: {avg_train_loss:.4f}")
             print(f"  Val Loss: {avg_val_loss:.4f}")
@@ -436,12 +460,20 @@ def train_model(model, train_loader, val_loader, epochs=50, lr=0.001, device='cu
             print(f"  Val F1: {f1:.4f}")
             
             # 打印混淆矩阵
-            if epoch == epochs - 1 or epoch == 4:
+            if epoch == epochs - 1 or epoch == 4 or early_stop:
                 cm = confusion_matrix(all_labels, all_preds)
                 print("\n混淆矩阵:")
                 print(f"         预测非发作  预测发作")
                 print(f"实际非发作:   {cm[0,0]:5d}      {cm[0,1]:5d}")
                 print(f"实际发作:     {cm[1,0]:5d}      {cm[1,1]:5d}")
+    
+    # 训练结束后的信息
+    if early_stop:
+        print(f"\n训练提前结束，实际训练了 {epoch + 1} 个epoch")
+        print(f"最佳验证损失: {best_val_loss:.4f}")
+    else:
+        print(f"\n训练完成，共训练了 {epochs} 个epoch")
+        print(f"最佳验证损失: {best_val_loss:.4f}")
     
     return history
 
@@ -758,89 +790,71 @@ def test_model(model, test_loader, device='cuda'):
 
 def main():
     print("\n" + "="*70)
-    print("开始训练RDANet模型 on STFT数据 (K折交叉验证)")
+    print("开始训练RDANet模型 on STFT数据 (直接加载训练/验证/测试集)")
     print("="*70)
     
     # 1. 设置基础路径
     base_data_dir = "D:/Graduation_thesis"  # 基础数据目录
     
-    # 2. 设置K折交叉验证参数
-    n_folds = 2  # K折数
-    print(f"\n使用 {n_folds} 折交叉验证")
-    
-    # 3. 加载训练样本
-    training_samples_path = base_data_dir + "/training_samples_5s_2_3.npz"
-    samples, labels, metadata, global_mean, global_std = load_training_samples(training_samples_path)
-    
-    # 4. 创建数据集
+    # 2. 加载训练、验证、测试样本
     print("\n" + "="*70)
-    print("创建数据集...")
+    print("加载数据集...")
     print("="*70)
     
+    train_path = base_data_dir + "/training_samples_2_3_train.npz"
+    val_path = base_data_dir + "/training_samples_2_3_val.npz"
+    test_path = base_data_dir + "/training_samples_2_3_test.npz"
+    
     try:
-        full_dataset = LocalSTFTDataset(samples, labels)
+        # 加载训练集
+        print(f"\n加载训练集: {train_path}")
+        train_samples, train_labels, train_metadata, train_mean, train_std = load_training_samples(train_path)
+        train_dataset = LocalSTFTDataset(train_samples, train_labels)
+        
+        # 加载验证集
+        print(f"\n加载验证集: {val_path}")
+        val_samples, val_labels, val_metadata, val_mean, val_std = load_training_samples(val_path)
+        val_dataset = LocalSTFTDataset(val_samples, val_labels)
+        
+        # 加载测试集
+        print(f"\n加载测试集: {test_path}")
+        test_samples, test_labels, test_metadata, test_mean, test_std = load_training_samples(test_path)
+        test_dataset = LocalSTFTDataset(test_samples, test_labels)
+        
     except Exception as e:
-        print(f"\n❌ 创建数据集失败: {e}")
+        print(f"\n❌ 加载数据集失败: {e}")
         return
     
-    # 5. 获取输入维度
-    sample_data, _ = full_dataset[0]
+    # 3. 获取输入维度
+    sample_data, _ = train_dataset[0]
     n_channels, n_time, n_freq = sample_data.shape
     print(f"\n输入维度: n_channels={n_channels}, n_time={n_time}, n_freq={n_freq}")
     
-    # 7. 设置设备
+    print(f"\n数据集大小:")
+    print(f"  训练集: {len(train_dataset)}")
+    print(f"  验证集: {len(val_dataset)}")
+    print(f"  测试集: {len(test_dataset)}")
+    
+    # 4. 设置设备
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\n使用设备: {device}")
     
-    # 8. K折交叉验证
+    # 5. 创建数据加载器
     print("\n" + "="*70)
-    print(f"开始 {n_folds} 折交叉验证")
+    print("创建数据加载器...")
     print("="*70)
     
-    # 创建KFold对象
-    kfold = KFold(n_splits=n_folds, shuffle=True, random_state=42)
+    batch_size = 16  # batch size
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
     
-    # 存储所有折的结果
-    all_fold_results = []
-    all_fold_histories = []
+    # 6. 初始化模型
+    print("\n" + "="*70)
+    print("初始化模型...")
+    print("="*70)
     
-    # 遍历每一折
-    for fold, (train_idx, test_idx) in enumerate(kfold.split(range(len(full_dataset)))):
-        print(f"\n{'='*70}")
-        print(f"第 {fold+1}/{n_folds} 折")
-        print(f"{'='*70}")
-        
-        # 创建训练集和测试集
-        train_dataset = torch.utils.data.Subset(full_dataset, train_idx)
-        test_dataset = torch.utils.data.Subset(full_dataset, test_idx)
-        
-        # 从训练集中划分验证集
-        train_size = int(0.85 * len(train_dataset))
-        val_size = len(train_dataset) - train_size
-        train_dataset, val_dataset = torch.utils.data.random_split(
-            train_dataset, [train_size, val_size],
-            generator=torch.Generator().manual_seed(42)
-        )
-        
-        print(f"训练集大小: {len(train_dataset)}")
-        print(f"验证集大小: {len(val_dataset)}")
-        print(f"测试集大小: {len(test_dataset)}")
-        
-        # 创建数据加载器
-        batch_size = 16  # 最小batch size以节省内存
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
-        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
-        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
-        
-        # # 初始化模型
-        # model = RDANet(
-        #     in_channels=n_channels,
-        #     num_classes=2,
-        #     dropout=0.3
-        # ).to(device)
-
-
-        model = RDANet(
+    model = RDANet(
         in_channels=1,           
         num_classes=2,          
         dropout=0.5,            
@@ -848,128 +862,101 @@ def main():
         spatial_height=n_channels,      
         spatial_width=n_time         
     ).to(device)
-        
-        print(f"模型参数总数: {sum(p.numel() for p in model.parameters()):,}")
-        
-        # 训练模型
-        history = train_model(
-            model=model,
-            train_loader=train_loader,
-            val_loader=val_loader,
-            epochs=50,
-            lr=0.0005,
-            device=device,
-            fold=fold
-        )
-        
-        # 加载最佳模型并测试
-        model_path = f'best_dual_model_fold{fold+1}.pth'
-        if Path(model_path).exists():
-            model.load_state_dict(torch.load(model_path))
-            test_results = test_model(model, test_loader, device)
-        else:
-            print(f"\n⚠️ 未找到最佳模型文件 {model_path}，使用最后一个epoch的模型进行测试")
-            test_results = test_model(model, test_loader, device)
-        
-        # 保存当前折的结果
-        all_fold_results.append(test_results)
-        all_fold_histories.append(history)
-        
-        print(f"\n✅ 第 {fold+1} 折完成！")
     
-    # 9. 汇总所有折的结果
+    print(f"模型参数总数: {sum(p.numel() for p in model.parameters()):,}")
+    
+    # 7. 训练模型
     print("\n" + "="*70)
-    print("K折交叉验证结果汇总")
+    print("开始训练模型")
     print("="*70)
     
-    # 计算平均指标
-    avg_accuracy = np.mean([r['accuracy'] for r in all_fold_results])
-    avg_precision = np.mean([r['precision'] for r in all_fold_results])
-    avg_recall = np.mean([r['recall'] for r in all_fold_results])
-    avg_f1 = np.mean([r['f1'] for r in all_fold_results])
-    avg_sensitivity = np.mean([r['sensitivity'] for r in all_fold_results])
-    avg_specificity = np.mean([r['specificity'] for r in all_fold_results])
-    avg_auc = np.mean([r['auc'] for r in all_fold_results])
+    history = train_model(
+        model=model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        epochs=50,
+        lr=0.0005,
+        device=device,
+        fold=0,  # 使用fold=0表示非K折训练
+        patience=10  # Early stopping耐心值：验证损失连续10个epoch不改善则停止
+    )
     
-    std_accuracy = np.std([r['accuracy'] for r in all_fold_results])
-    std_precision = np.std([r['precision'] for r in all_fold_results])
-    std_recall = np.std([r['recall'] for r in all_fold_results])
-    std_f1 = np.std([r['f1'] for r in all_fold_results])
-    std_sensitivity = np.std([r['sensitivity'] for r in all_fold_results])
-    std_specificity = np.std([r['specificity'] for r in all_fold_results])
-    std_auc = np.std([r['auc'] for r in all_fold_results])
-    
-    print(f"\n平均指标:")
-    print(f"  Accuracy:    {avg_accuracy:.4f} ± {std_accuracy:.4f}")
-    print(f"  Precision:   {avg_precision:.4f} ± {std_precision:.4f}")
-    print(f"  Recall:      {avg_recall:.4f} ± {std_recall:.4f}")
-    print(f"  F1 Score:    {avg_f1:.4f} ± {std_f1:.4f}")
-    print(f"  Sensitivity: {avg_sensitivity:.4f} ± {std_sensitivity:.4f}  (发作样本正确识别率)")
-    print(f"  Specificity: {avg_specificity:.4f} ± {std_specificity:.4f}  (非发作样本正确识别率)")
-    print(f"  AUC:         {avg_auc:.4f} ± {std_auc:.4f}")
-    
-    # 12. 选择最佳模型
+    # 8. 加载最佳模型并测试
     print("\n" + "="*70)
-    print("选择最佳模型")
+    print("测试模型")
     print("="*70)
     
-    # 使用F1分数作为主要指标选择最佳模型
-    best_fold_idx = np.argmax([r['f1'] for r in all_fold_results])
-    best_fold = best_fold_idx + 1
-    best_results = all_fold_results[best_fold_idx]
+    model_path = 'best_dual_model_fold0.pth'
+    if Path(model_path).exists():
+        model.load_state_dict(torch.load(model_path))
+        print(f"✅ 加载最佳模型: {model_path}")
+    else:
+        print(f"⚠️ 未找到最佳模型文件 {model_path}，使用最后一个epoch的模型进行测试")
     
-    print(f"\n最佳模型: 第 {best_fold} 折")
-    print(f"  F1 Score:  {best_results['f1']:.4f}")
-    print(f"  Accuracy:  {best_results['accuracy']:.4f}")
-    print(f"  Precision: {best_results['precision']:.4f}")
-    print(f"  Recall:    {best_results['recall']:.4f}")
-    print(f"  AUC:       {best_results['auc']:.4f}")
+    test_results = test_model(model, test_loader, device)
     
-
+    # 9. 打印测试结果
+    print("\n" + "="*70)
+    print("测试结果")
+    print("="*70)
+    print(f"  Accuracy:    {test_results['accuracy']:.4f}")
+    print(f"  Precision:   {test_results['precision']:.4f}")
+    print(f"  Recall:      {test_results['recall']:.4f}")
+    print(f"  F1 Score:    {test_results['f1']:.4f}")
+    print(f"  Sensitivity: {test_results['sensitivity']:.4f}  (发作样本正确识别率)")
+    print(f"  Specificity: {test_results['specificity']:.4f}  (非发作样本正确识别率)")
+    print(f"  AUC:         {test_results['auc']:.4f}")
     
-    # 10. 绘制所有折的训练曲线
-    plot_kfold_training_history(all_fold_histories, n_folds)
+    # 10. 绘制训练曲线
+    print("\n" + "="*70)
+    print("绘制训练曲线...")
+    print("="*70)
+    plot_training_history(history)
     
     # 11. 保存结果
-    converted_results = []
-    for i, (results, history) in enumerate(zip(all_fold_results, all_fold_histories)):
-        converted_history = {}
-        for key, values in history.items():
-            converted_history[key] = [float(v) for v in values]
-        
-        converted_result = {
-            'fold': i + 1,
-            'accuracy': float(results['accuracy']),
-            'precision': float(results['precision']),
-            'recall': float(results['recall']),
-            'f1': float(results['f1']),
-            'auc': float(results['auc']),
-            'confusion_matrix': results['confusion_matrix'].tolist(),
-            'history': converted_history
+    print("\n" + "="*70)
+    print("保存训练结果...")
+    print("="*70)
+    
+    converted_history = {}
+    for key, values in history.items():
+        converted_history[key] = [float(v) for v in values]
+    
+    results = {
+        'test_results': {
+            'accuracy': float(test_results['accuracy']),
+            'precision': float(test_results['precision']),
+            'recall': float(test_results['recall']),
+            'f1': float(test_results['f1']),
+            'auc': float(test_results['auc']),
+            'sensitivity': float(test_results['sensitivity']),
+            'specificity': float(test_results['specificity']),
+            'confusion_matrix': test_results['confusion_matrix'].tolist()
+        },
+        'history': converted_history,
+        'model_config': {
+            'in_channels': 1,
+            'num_classes': 2,
+            'dropout': 0.5,
+            'spectral_bands': n_freq,
+            'spatial_height': n_channels,
+            'spatial_width': n_time
+        },
+        'dataset_info': {
+            'train_size': len(train_dataset),
+            'val_size': len(val_dataset),
+            'test_size': len(test_dataset),
+            'n_channels': n_channels,
+            'n_time': n_time,
+            'n_freq': n_freq
         }
-        converted_results.append(converted_result)
+    }
     
-    # 保存汇总结果
-
-    # summary_results = {
-    #     'patients': patient_ids,
-    #     'num_stft_files': len(all_stft_files),
-    #     'num_seizure_files': len(all_seizure_times),
-    #     'n_folds': n_folds,
-    #     'fold_results': converted_results,
-    #     'average_metrics': {
-    #         'accuracy': {'mean': float(avg_accuracy), 'std': float(std_accuracy)},
-    #         'precision': {'mean': float(avg_precision), 'std': float(std_precision)},
-    #         'recall': {'mean': float(avg_recall), 'std': float(std_recall)},
-    #         'f1': {'mean': float(avg_f1), 'std': float(std_f1)},
-    #         'auc': {'mean': float(avg_auc), 'std': float(std_auc)}
-    #     }
-    # }
+    with open('training_results.json', 'w') as f:
+        json.dump(results, f, indent=2)
     
-    # with open('kfold_training_results.json', 'w') as f:
-    #     json.dump(summary_results, f, indent=2)
-    
-    print("\n✅ K折交叉验证完成！")
+    print("\n✅ 训练完成！结果已保存到 training_results.json")
+    print(f"\n最佳模型已保存: {model_path}")
     
 
 
