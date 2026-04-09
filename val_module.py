@@ -749,6 +749,152 @@ class SpatialAttention(nn.Module):
         return x * out
 
 
+# class RDANet(nn.Module):
+#     """
+#     RDANet模型 - 基于高光谱图像分类架构
+#     输入格式: (batch, channels, height, width, spectral)
+#     原始架构: 输入 (1, 22, 9, 114)
+    
+#     对于脑电信号频谱图，需要调整输入格式：
+#     如果输入是 (batch, 22, n_time, n_freq)，则视为 (batch, 1, 22, n_time, n_freq)
+#     即把22个通道视为空间高度，n_time视为宽度，n_freq视为光谱维度
+#     """
+#     def __init__(self, in_channels=1, num_classes=2, dropout=0.3, 
+#                  spectral_bands=114, spatial_height=22, spatial_width=9):
+#         """
+#         Args:
+#             in_channels: 输入通道数（对于高光谱，通常为1）
+#             num_classes: 分类类别数
+#             dropout: dropout率
+#             spectral_bands: 光谱波段数
+#             spatial_height: 空间高度
+#             spatial_width: 空间宽度
+#         """
+#         super().__init__()
+        
+#         self.spectral_bands = spectral_bands
+#         self.spatial_height = spatial_height
+#         self.spatial_width = spatial_width
+        
+#         # ========== 第一阶段：3D卷积 + 3D池化 ==========
+#         # Conv3D: 输入 (batch, in_channels, H, W, D)
+#         # 输出通道数: 64
+#         self.conv3d = nn.Conv3d(in_channels, 64, kernel_size=(spatial_height, 3, 5), 
+#                                  stride=(1, 1, 2), padding=0, bias=False)
+#         self.bn3d = nn.BatchNorm3d(64)
+#         self.relu3d = nn.ReLU(inplace=True)
+        
+#         # 3D池化: 只在光谱维度池化
+#         self.pool3d = nn.MaxPool3d(kernel_size=(1, 1, 2), stride=(1, 1, 2), ceil_mode=True)
+        
+#         # ========== 第二阶段：ResNet 残差块（2D卷积） ==========
+#         # 注意：经过3D卷积和池化后，输出为 (batch, 64, 1, 7, 28)
+#         # Reshape后为 (batch, 64, 7, 28)
+        
+#         # ResNet Block1: 64通道，空间尺寸 7x28，重复2次
+#         self.block1 = self._make_layer(64, 64, 2, stride=1, dropout=dropout)
+        
+#         # ResNet Block2: 128通道，空间尺寸 4x14，重复2次
+#         self.block2 = self._make_layer(64, 128, 2, stride=2, dropout=dropout)
+        
+#         # ResNet Block3: 256通道，空间尺寸 2x7，重复2次
+#         self.block3 = self._make_layer(128, 256, 2, stride=2, dropout=dropout)
+        
+#         # ResNet Block4: 512通道，空间尺寸 1x4，重复2次
+#         self.block4 = self._make_layer(256, 512, 2, stride=2, dropout=dropout)
+        
+#         # ========== 第三阶段：双自注意力 ==========
+#         self.dual_attention = DualSelfAttention(512)
+        
+#         # ========== 第四阶段：分类头 ==========
+#         # 全局平均池化
+#         self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
+        
+#         # 分类器
+#         self.classifier = nn.Sequential(
+#             nn.Flatten(),
+#             nn.Linear(512, num_classes)
+#         )
+        
+#         # 初始化权重
+#         self._initialize_weights()
+    
+#     def _make_layer(self, in_channels, out_channels, num_blocks, stride, dropout):
+#         """创建残差块组"""
+#         layers = []
+        
+#         # 第一个残差块（可能改变通道数和尺寸）
+#         layers.append(BasicBlock(in_channels, out_channels, stride, dropout))
+        
+#         # 后续残差块（保持通道数和尺寸）
+#         for _ in range(1, num_blocks):
+#             layers.append(BasicBlock(out_channels, out_channels, 1, dropout))
+        
+#         return nn.Sequential(*layers)
+    
+#     def _initialize_weights(self):
+#         """权重初始化"""
+#         for m in self.modules():
+#             if isinstance(m, nn.Conv2d) or isinstance(m, nn.Conv3d):
+#                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+#                 if m.bias is not None:
+#                     nn.init.constant_(m.bias, 0)
+#             elif isinstance(m, nn.BatchNorm2d) or isinstance(m, nn.BatchNorm3d):
+#                 nn.init.constant_(m.weight, 1)
+#                 nn.init.constant_(m.bias, 0)
+#             elif isinstance(m, nn.Linear):
+#                 nn.init.normal_(m.weight, 0, 0.01)
+#                 nn.init.constant_(m.bias, 0)
+    
+#     def forward(self, x):
+#         """
+#         Args:
+#             x: 输入张量
+#                选项1: (batch, 1, H, W, D) 标准5D高光谱输入
+#                选项2: (batch, 22, n_time, n_freq) 脑电频谱图，需reshape为 (batch, 1, 22, n_time, n_freq)
+#         Returns:
+#             output: (batch, num_classes)
+#         """
+#         # 处理输入维度
+#         if x.dim() == 4:
+#             # 输入是 (batch, channels, height, width) 格式
+#             # 假设 channels=22 是空间高度，height是时间，width是频率
+#             batch, channels, height, width = x.shape
+#             # 重塑为 (batch, 1, spatial_height, spatial_width, spectral_bands)
+#             # 这里假设 channels=22 是空间高度，height是宽度，width是光谱维度
+#             x = x.unsqueeze(1)  # (batch, 1, 22, height, width)
+        
+#         # 输入形状: (batch, 1, H, W, D)
+#         # H = 22 (空间高度)
+#         # W = n_time (时间/宽度)
+#         # D = n_freq (频率/光谱)
+        
+#         # ========== 3D卷积 ==========
+#         x = self.conv3d(x)  # (batch, 64, 1, W_out, D_out)
+#         x = self.bn3d(x)
+#         x = self.relu3d(x)
+        
+#         # ========== 3D池化 ==========
+#         x = self.pool3d(x)  # (batch, 64, 1, W_pool, D_pool)
+        
+#         # ========== Reshape: 移除高度维度 ==========
+#         # 输入: (batch, 64, 1, H, W) -> (batch, 64, H, W)
+#         x = x.squeeze(2)  # (batch, 64, H, W)
+        
+#         # ========== ResNet 残差块 ==========
+#         x = self.block1(x)  # (batch, 64, H1, W1)
+#         x = self.block2(x)  # (batch, 128, H2, W2)
+#         x = self.block3(x)  # (batch, 256, H3, W3)
+#         x = self.block4(x)  # (batch, 512, H4, W4)
+        
+#         # ========== 双自注意力 ==========
+#         x = self.dual_attention(x)  # (batch, 512, H4, W4)
+        
+#         # ========== 分类 ==========
+#         x = self.global_avg_pool(x)  # (batch, 512, 1, 1)
+#         x = self.classifier(x)  # (batch, num_classes)
+        
+#         return x
 class RDANet(nn.Module):
     """
     RDANet模型 - 基于高光谱图像分类架构
@@ -896,7 +1042,65 @@ class RDANet(nn.Module):
         
         return x
 
-
+# class DualSelfAttention(nn.Module):
+#     """
+#     双自注意力模块：位置自注意力 + 通道自注意力
+#     输入: (batch, C, H, W)
+#     输出: (batch, C, H, W)
+#     """
+#     def __init__(self, in_channels):
+#         super().__init__()
+#         self.in_channels = in_channels
+        
+#         # 位置注意力
+#         self.position_query = nn.Conv2d(in_channels, in_channels // 8, kernel_size=1)
+#         self.position_key = nn.Conv2d(in_channels, in_channels // 8, kernel_size=1)
+#         self.position_value = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+        
+#         # 通道注意力
+#         self.channel_query = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+#         self.channel_key = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+#         self.channel_value = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+        
+#         # 输出投影
+#         self.position_gamma = nn.Parameter(torch.zeros(1))
+#         self.channel_gamma = nn.Parameter(torch.zeros(1))
+        
+#     def forward(self, x):
+#         batch, C, H, W = x.shape
+#         N = H * W  # 空间位置数
+        
+#         # ========== 位置自注意力 ==========
+#         # 生成 Q, K, V
+#         pos_q = self.position_query(x).view(batch, -1, N).permute(0, 2, 1)  # (B, N, C/8)
+#         pos_k = self.position_key(x).view(batch, -1, N)  # (B, C/8, N)
+#         pos_v = self.position_value(x).view(batch, -1, N)  # (B, C, N)
+        
+#         # 计算注意力图
+#         pos_attn = torch.bmm(pos_q, pos_k)  # (B, N, N)
+#         pos_attn = F.softmax(pos_attn, dim=-1)
+        
+#         # 加权求和
+#         pos_out = torch.bmm(pos_v, pos_attn.permute(0, 2, 1))  # (B, C, N)
+#         pos_out = pos_out.view(batch, C, H, W)
+#         pos_out = self.position_gamma * pos_out + x  # 残差连接
+        
+#         # ========== 通道自注意力 ==========
+#         # 生成 Q, K, V
+#         chan_q = self.channel_query(pos_out).view(batch, C, -1)  # (B, C, N)
+#         chan_k = self.channel_key(pos_out).view(batch, C, -1)  # (B, C, N)
+#         chan_v = self.channel_value(pos_out).view(batch, C, -1)  # (B, C, N)
+        
+#         # 计算注意力图
+#         chan_attn = torch.bmm(chan_q, chan_k.permute(0, 2, 1))  # (B, C, C)
+#         chan_attn = F.softmax(chan_attn, dim=-1)
+        
+#         # 加权求和
+#         chan_out = torch.bmm(chan_attn, chan_v)  # (B, C, N)
+#         chan_out = chan_out.view(batch, C, H, W)
+#         chan_out = self.channel_gamma * chan_out + pos_out  # 残差连接
+        
+#         return chan_out
 class DualSelfAttention(nn.Module):
     """
     双自注意力模块：位置自注意力 + 通道自注意力
@@ -908,14 +1112,18 @@ class DualSelfAttention(nn.Module):
         self.in_channels = in_channels
         
         # 位置注意力
-        self.position_query = nn.Conv2d(in_channels, in_channels // 8, kernel_size=1)
-        self.position_key = nn.Conv2d(in_channels, in_channels // 8, kernel_size=1)
-        self.position_value = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+        #self.position_query = nn.Conv2d(in_channels, in_channels // 8, kernel_size=1)
+        # self.position_key = nn.Conv2d(in_channels, in_channels // 8, kernel_size=1)
+        # self.position_value = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+        self.position_query = nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1)
+        self.position_key = nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1)
+        self.position_value = nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1)
+       
         
         # 通道注意力
-        self.channel_query = nn.Conv2d(in_channels, in_channels, kernel_size=1)
-        self.channel_key = nn.Conv2d(in_channels, in_channels, kernel_size=1)
-        self.channel_value = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+        # self.channel_query = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+        # self.channel_key = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+        # self.channel_value = nn.Conv2d(in_channels, in_channels, kernel_size=1)
         
         # 输出投影
         self.position_gamma = nn.Parameter(torch.zeros(1))
@@ -927,36 +1135,43 @@ class DualSelfAttention(nn.Module):
         
         # ========== 位置自注意力 ==========
         # 生成 Q, K, V
-        pos_q = self.position_query(x).view(batch, -1, N).permute(0, 2, 1)  # (B, N, C/8)
-        pos_k = self.position_key(x).view(batch, -1, N)  # (B, C/8, N)
-        pos_v = self.position_value(x).view(batch, -1, N)  # (B, C, N)
+        pos_q = self.position_query(x).view(batch,C, N)
+        pos_k = self.position_key(x).view(batch,C, N)
+        pos_v = self.position_value(x).view(batch,C, N)
+        # pos_q = self.position_query(x).view(batch, -1, N).permute(0, 2, 1)  # (B, N, C/8)
+        # pos_k = self.position_key(x).view(batch, -1, N)  # (B, C/8, N)
+        # pos_v = self.position_value(x).view(batch, -1, N)  # (B, C, N)
         
         # 计算注意力图
-        pos_attn = torch.bmm(pos_q, pos_k)  # (B, N, N)
+        #pos_attn = torch.bmm(pos_q, pos_k)  # (B, N, N)
+        pos_attn = torch.bmm(pos_q.permute(0, 2, 1), pos_k)  # (B, N, N)
         pos_attn = F.softmax(pos_attn, dim=-1)
         
         # 加权求和
-        pos_out = torch.bmm(pos_v, pos_attn.permute(0, 2, 1))  # (B, C, N)
+        pos_out = torch.bmm(pos_v, pos_attn)  # (B, C, N)
         pos_out = pos_out.view(batch, C, H, W)
         pos_out = self.position_gamma * pos_out + x  # 残差连接
         
         # ========== 通道自注意力 ==========
-        # 生成 Q, K, V
-        chan_q = self.channel_query(pos_out).view(batch, C, -1)  # (B, C, N)
-        chan_k = self.channel_key(pos_out).view(batch, C, -1)  # (B, C, N)
-        chan_v = self.channel_value(pos_out).view(batch, C, -1)  # (B, C, N)
+        # # 生成 Q, K, V
+        # chan_q = self.channel_query(pos_out).view(batch, C, -1)  # (B, C, N)
+        # chan_k = self.channel_key(pos_out).view(batch, C, -1)  # (B, C, N)
+        # chan_v = self.channel_value(pos_out).view(batch, C, -1)  # (B, C, N)
         
-        # 计算注意力图
-        chan_attn = torch.bmm(chan_q, chan_k.permute(0, 2, 1))  # (B, C, C)
-        chan_attn = F.softmax(chan_attn, dim=-1)
-        
+        # # 计算注意力图
+        # chan_attn = torch.bmm(chan_q, chan_k.permute(0, 2, 1))  # (B, C, C)
+        # chan_attn = F.softmax(chan_attn, dim=-1)
+        chan_x1=x.view(batch,C,N)
+        chan_x2=torch.bmm(chan_x1,chan_x1.permute(0,2,1))
+        chan_x3=F.softmax(chan_x2, dim=-1)
+        chan_x4=torch.bmm(chan_x3,chan_x1)
+        chan_out=chan_x4.view(batch,C,H,W)
         # 加权求和
-        chan_out = torch.bmm(chan_attn, chan_v)  # (B, C, N)
-        chan_out = chan_out.view(batch, C, H, W)
-        chan_out = self.channel_gamma * chan_out + pos_out  # 残差连接
-        
-        return chan_out
-
+        # chan_out = torch.bmm(chan_attn, chan_v)  # (B, C, N)
+        # chan_out = chan_out.view(batch, C, H, W)
+        chan_out = self.channel_gamma * chan_out + x  # 残差连接
+        dual_out=pos_out+chan_out
+        return dual_out
 
 class BasicBlock(nn.Module):
     """
@@ -1083,7 +1298,7 @@ def main():
         base_data_dir = "D:/Graduation_thesis"  # 基础数据目录
         
         # 2. 加载预处理好的训练样本
-        training_samples_path = base_data_dir + "/chb06_samples.npz"
+        training_samples_path = base_data_dir + "/training_samples_5s_1_5.npz"
         samples, labels, metadata, global_mean, global_std = load_training_samples(training_samples_path)
         
         # 3. 创建数据集
@@ -1119,6 +1334,7 @@ def main():
         
         import glob
         model_files = glob.glob('best_dual_model_fold*.pth')
+        #model_files = glob.glob('best_model.pth')
         # path=Path("D:/Graduation_thesis/code/")
         # model_files=path.glob("best_dual_model_fold*.pth")
         

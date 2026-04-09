@@ -331,7 +331,7 @@ def train_model(model, train_loader, val_loader, epochs=50, lr=0.001, device='cu
     训练模型
     """
     # 损失函数和优化器
-    class_weights = torch.FloatTensor([1.0, 1.0]).to(device)  # 给发作类更高权重
+    class_weights = torch.FloatTensor([1.0, 2.0]).to(device)  # 给发作类更高权重
     criterion = nn.CrossEntropyLoss(weight=class_weights)
     optimizer = optim.Adam(model.parameters(), lr=lr)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
@@ -769,7 +769,7 @@ def main():
     print(f"\n使用 {n_folds} 折交叉验证")
     
     # 3. 加载训练样本
-    training_samples_path = base_data_dir + "/training_samples_30s.npz"
+    training_samples_path = base_data_dir + "/training_samples_5s_2_3.npz"
     samples, labels, metadata, global_mean, global_std = load_training_samples(training_samples_path)
     
     # 4. 创建数据集
@@ -827,7 +827,7 @@ def main():
         print(f"测试集大小: {len(test_dataset)}")
         
         # 创建数据加载器
-        batch_size = 64  # 最小batch size以节省内存
+        batch_size = 16  # 最小batch size以节省内存
         train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
         val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
         test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
@@ -988,14 +988,18 @@ class DualSelfAttention(nn.Module):
         self.in_channels = in_channels
         
         # 位置注意力
-        self.position_query = nn.Conv2d(in_channels, in_channels // 8, kernel_size=1)
-        self.position_key = nn.Conv2d(in_channels, in_channels // 8, kernel_size=1)
-        self.position_value = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+        #self.position_query = nn.Conv2d(in_channels, in_channels // 8, kernel_size=1)
+        # self.position_key = nn.Conv2d(in_channels, in_channels // 8, kernel_size=1)
+        # self.position_value = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+        self.position_query = nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1)
+        self.position_key = nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1)
+        self.position_value = nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1)
+       
         
         # 通道注意力
-        self.channel_query = nn.Conv2d(in_channels, in_channels, kernel_size=1)
-        self.channel_key = nn.Conv2d(in_channels, in_channels, kernel_size=1)
-        self.channel_value = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+        # self.channel_query = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+        # self.channel_key = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+        # self.channel_value = nn.Conv2d(in_channels, in_channels, kernel_size=1)
         
         # 输出投影
         self.position_gamma = nn.Parameter(torch.zeros(1))
@@ -1007,35 +1011,43 @@ class DualSelfAttention(nn.Module):
         
         # ========== 位置自注意力 ==========
         # 生成 Q, K, V
-        pos_q = self.position_query(x).view(batch, -1, N).permute(0, 2, 1)  # (B, N, C/8)
-        pos_k = self.position_key(x).view(batch, -1, N)  # (B, C/8, N)
-        pos_v = self.position_value(x).view(batch, -1, N)  # (B, C, N)
+        pos_q = self.position_query(x).view(batch,C, N)
+        pos_k = self.position_key(x).view(batch,C, N)
+        pos_v = self.position_value(x).view(batch,C, N)
+        # pos_q = self.position_query(x).view(batch, -1, N).permute(0, 2, 1)  # (B, N, C/8)
+        # pos_k = self.position_key(x).view(batch, -1, N)  # (B, C/8, N)
+        # pos_v = self.position_value(x).view(batch, -1, N)  # (B, C, N)
         
         # 计算注意力图
-        pos_attn = torch.bmm(pos_q, pos_k)  # (B, N, N)
+        #pos_attn = torch.bmm(pos_q, pos_k)  # (B, N, N)
+        pos_attn = torch.bmm(pos_q.permute(0, 2, 1), pos_k)  # (B, N, N)
         pos_attn = F.softmax(pos_attn, dim=-1)
         
         # 加权求和
-        pos_out = torch.bmm(pos_v, pos_attn.permute(0, 2, 1))  # (B, C, N)
+        pos_out = torch.bmm(pos_v, pos_attn)  # (B, C, N)
         pos_out = pos_out.view(batch, C, H, W)
         pos_out = self.position_gamma * pos_out + x  # 残差连接
         
         # ========== 通道自注意力 ==========
-        # 生成 Q, K, V
-        chan_q = self.channel_query(pos_out).view(batch, C, -1)  # (B, C, N)
-        chan_k = self.channel_key(pos_out).view(batch, C, -1)  # (B, C, N)
-        chan_v = self.channel_value(pos_out).view(batch, C, -1)  # (B, C, N)
+        # # 生成 Q, K, V
+        # chan_q = self.channel_query(pos_out).view(batch, C, -1)  # (B, C, N)
+        # chan_k = self.channel_key(pos_out).view(batch, C, -1)  # (B, C, N)
+        # chan_v = self.channel_value(pos_out).view(batch, C, -1)  # (B, C, N)
         
-        # 计算注意力图
-        chan_attn = torch.bmm(chan_q, chan_k.permute(0, 2, 1))  # (B, C, C)
-        chan_attn = F.softmax(chan_attn, dim=-1)
-        
+        # # 计算注意力图
+        # chan_attn = torch.bmm(chan_q, chan_k.permute(0, 2, 1))  # (B, C, C)
+        # chan_attn = F.softmax(chan_attn, dim=-1)
+        chan_x1=x.view(batch,C,N)
+        chan_x2=torch.bmm(chan_x1,chan_x1.permute(0,2,1))
+        chan_x3=F.softmax(chan_x2, dim=-1)
+        chan_x4=torch.bmm(chan_x3,chan_x1)
+        chan_out=chan_x4.view(batch,C,H,W)
         # 加权求和
-        chan_out = torch.bmm(chan_attn, chan_v)  # (B, C, N)
-        chan_out = chan_out.view(batch, C, H, W)
-        chan_out = self.channel_gamma * chan_out + pos_out  # 残差连接
-        
-        return chan_out
+        # chan_out = torch.bmm(chan_attn, chan_v)  # (B, C, N)
+        # chan_out = chan_out.view(batch, C, H, W)
+        chan_out = self.channel_gamma * chan_out + x  # 残差连接
+        dual_out=pos_out+chan_out
+        return dual_out
 
 
 class BasicBlock(nn.Module):
