@@ -1298,7 +1298,7 @@ def main():
         base_data_dir = "D:/Graduation_thesis"  # 基础数据目录
         
         # 2. 加载预处理好的训练样本
-        training_samples_path = base_data_dir + "/training_samples_5s_1_5.npz"
+        training_samples_path = base_data_dir + "/training_samples_1_5_train.npz"
         samples, labels, metadata, global_mean, global_std = load_training_samples(training_samples_path)
         
         # 3. 创建数据集
